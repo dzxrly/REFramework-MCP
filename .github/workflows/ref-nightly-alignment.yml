@@ -33,7 +33,7 @@ jobs:
       baseline_tag: ${{ steps.release.outputs.baseline_tag }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Resolve release tag and source commit
         id: release
@@ -87,7 +87,7 @@ jobs:
     timeout-minutes: 150
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Restore successful alignment marker
         id: alignment-cache
@@ -111,14 +111,14 @@ jobs:
 
       - name: Check out official REF Nightly source
         if: ${{ steps.alignment-cache.outputs.cache-hit != 'true' || inputs.force_rebuild == true }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: praydog/REFramework
           ref: ${{ needs.resolve.outputs.sha }}
           path: reframework-source
           submodules: recursive
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         if: ${{ steps.alignment-cache.outputs.cache-hit != 'true' || inputs.force_rebuild == true }}
         with:
           python-version: "3.13"

@@ -26,9 +26,9 @@ jobs:
           - "3.13"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -87,7 +87,7 @@ jobs:
     timeout-minutes: 90
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Resolve verified REF Nightly baseline
         id: baseline
@@ -99,7 +99,7 @@ jobs:
           "commit=$($baseline.commit)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Check out pinned REFramework
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: praydog/REFramework
           ref: ${{ steps.baseline.outputs.commit }}
@@ -107,7 +107,7 @@ jobs:
           submodules: recursive
 
       - name: Check out baseline for semantic adapter comparison
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: praydog/REFramework
           ref: ${{ steps.baseline.outputs.commit }}
