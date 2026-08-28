@@ -1,0 +1,148 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 8a63cc7..1111111 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1502,6 +1502,12 @@ if(REF_BUILD_FRAMEWORK AND CMAKE_SIZEOF_VOID_P EQUAL 8) # build-framework
+ 		"src/mods/tools/GameObjectsDisplay.hpp"
+ 		"src/mods/tools/ObjectExplorer.cpp"
+ 		"src/mods/tools/ObjectExplorer.hpp"
++		"src/ExportServiceV1.cpp"
++		"src/ExportServiceV1.hpp"
++		"src/ExportServiceHooks.hpp"
++		"src/ProbeServiceV1.cpp"
++		"src/ProbeServiceV1.hpp"
++		"src/ProbeServiceHooks.hpp"
+ 		"src/mods/vr/Bindings.cpp"
+ 		"src/mods/vr/D3D11Component.cpp"
+ 		"src/mods/vr/D3D11Component.hpp"
+@@ -1591,5 +1593,6 @@ if(REF_BUILD_FRAMEWORK AND CMAKE_SIZEOF_VOID_P EQUAL 8) # build-framework
+ 		glm_static
+ 		shlwapi
++		bcrypt
+ 		openvr
+ 		openxr_loader
+ 		delayimp
+diff --git a/cmake.toml b/cmake.toml
+index 005a65c..4444444 100644
+--- a/cmake.toml
++++ b/cmake.toml
+@@ -238,6 +238,7 @@ link-libraries = [
+     "d3d11",
+     "glm_static",
+     "shlwapi",
++    "bcrypt",
+     "openvr",
+     "openxr_loader",
+     "delayimp",
+diff --git a/src/mods/tools/ObjectExplorer.hpp b/src/mods/tools/ObjectExplorer.hpp
+index c58ce20..2222222 100644
+--- a/src/mods/tools/ObjectExplorer.hpp
++++ b/src/mods/tools/ObjectExplorer.hpp
+@@ -150,6 +150,11 @@ public:
+     void on_draw_dev_ui() override;
+     void on_frame() override;
+     void on_lua_state_created(sol::state& lua) override;
++
++    bool generate_sdk(bool skip_sdkgenny);
++    bool is_dumping_sdk() const noexcept { return m_dumping_sdk.load(); }
++    float sdk_dump_progress() const noexcept { return m_sdk_dump_progress.load(); }
++    int sdk_dump_stage() const noexcept { return static_cast<int>(m_sdk_dump_stage.load()); }
+ 
+     void handle_address(Address address, int32_t offset = -1, Address parent = nullptr, Address real_address = nullptr);
+     
+@@ -162,7 +167,7 @@ private:
+     std::string generate_full_name(sdk::RETypeDB* tdb, uint32_t i);
+     void export_deserializer_chain(nlohmann::json& il2cpp_dump, sdk::RETypeDB* tdb, REType* t, std::optional<std::string> real_name = std::nullopt);
+ #endif
+-    void generate_sdk(bool skip_sdkgenny);
++    void generate_sdk_impl(bool skip_sdkgenny);
+     void report_sdk_dump_progress(float progress);
+ 
+     void handle_game_object(REGameObject* game_object);
+diff --git a/src/mods/tools/ObjectExplorer.cpp b/src/mods/tools/ObjectExplorer.cpp
+index 3638fed..3333333 100644
+--- a/src/mods/tools/ObjectExplorer.cpp
++++ b/src/mods/tools/ObjectExplorer.cpp
+@@ -27,5 +27,6 @@
+ #include <sdk/REGameObject.hpp>
+ #include "REFramework.hpp"
+ #include "ObjectExplorer.hpp"
++#include "ExportServiceHooks.hpp"
+ #include <sdk/GameIdentity.hpp>
+ #include <sdk/RETypeDefDispatch.hpp>
+@@ -1209,12 +1210,64 @@ void ObjectExplorer::export_deserializer_chain(nlohmann::json& il2cpp_dump, sdk:
+ }
+ #endif
+ 
+-void ObjectExplorer::generate_sdk(const bool skip_sdkgenny) {
++bool ObjectExplorer::generate_sdk(const bool skip_sdkgenny) {
++    bool expected = false;
++    if (!m_dumping_sdk.compare_exchange_strong(expected, true)) {
++        return false;
++    }
++    m_sdk_dump_progress = 0.0f;
++    m_sdk_dump_stage = SdkDumpStage::DUMP_INITIALIZATION;
++    try {
++        generate_sdk_impl(skip_sdkgenny);
++    } catch (...) {
++        m_dumping_sdk = false;
++        m_sdk_dump_stage = SdkDumpStage::NONE;
++        throw;
++    }
++    m_dumping_sdk = false;
++    m_sdk_dump_stage = SdkDumpStage::NONE;
++    return true;
++}
++
++bool reframework_generate_sdk(const bool skip_sdkgenny) {
++    return ObjectExplorer::get()->generate_sdk(skip_sdkgenny);
++}
++
++float reframework_sdk_dump_progress() noexcept {
++    return ObjectExplorer::get()->sdk_dump_progress();
++}
++
++int reframework_sdk_dump_stage() noexcept {
++    return ObjectExplorer::get()->sdk_dump_stage();
++}
++
++const char* reframework_export_game_name() noexcept {
++    return REFramework::get_game_name();
++}
++
++std::wstring reframework_export_persistent_file(const char* name) {
++    return REFramework::get_persistent_dir(name).wstring();
++}
++
++REFMCPExportTDBInfo reframework_export_tdb_info() noexcept {
++    const auto* tdb = sdk::RETypeDB::get();
++    if (tdb == nullptr) {
++        return {};
++    }
++    return {
++        tdb->get_version(),
++        tdb->get_num_types(),
++        tdb->get_num_methods(),
++        tdb->get_num_fields(),
++        tdb->get_num_properties(),
++    };
++}
++
++void ObjectExplorer::generate_sdk_impl(const bool skip_sdkgenny) {
+     // enums
+     //auto ref = utility::scan(g_framework->get_module().as<HMODULE>(), "66 C7 40 18 01 01 48 89 05 ? ? ? ?");
+     //auto& l = *(std::map<uint64_t, REEnumData>*)(utility::calculate_absolute(*ref + 9));
+ 
+-    m_dumping_sdk = true;
+     m_sdk_dump_stage = SdkDumpStage::DUMP_INITIALIZATION;
+     uint32_t k = 0;
+     auto n_types = 0ull;
+@@ -2526,8 +2579,6 @@ void ObjectExplorer::generate_sdk(const bool skip_sdkgenny) {
+     g_fqntypedb.clear();
+     g_iparamdb.clear();
+     g_imethoddb.clear();
+-
+-    m_dumping_sdk = false;
+ }
+ 
+ void ObjectExplorer::report_sdk_dump_progress(float progress) {

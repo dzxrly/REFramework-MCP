@@ -1,0 +1,24 @@
+[server]
+transport = "stdio"
+host = "127.0.0.1"
+port = 8765
+
+[bridge]
+pipe_name = "\\\\.\\pipe\\reframework-mcp-v1"
+connect_timeout_seconds = 2.0
+request_timeout_seconds = 30.0
+
+[storage]
+# Empty values use %LOCALAPPDATA%\\REFramework-MCP.
+data_dir = ""
+database_path = ""
+
+[policy]
+allow_generate_sdk = true
+prompt_force_generate_sdk = true
+allow_runtime_read = true
+require_mutation_approval = true
+allow_observe_hooks = true
+
+[usage]
+mod_roots = []

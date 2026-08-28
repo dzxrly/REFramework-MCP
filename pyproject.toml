@@ -1,0 +1,96 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "reframework-mcp"
+version = "1.0.0"
+description = "MCP server for exploring and testing RE Engine games through REFramework"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "dzxrly" }]
+keywords = [
+  "mcp",
+  "model-context-protocol",
+  "reframework",
+  "re-engine",
+  "game-modding",
+  "il2cpp",
+  "lua",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Games/Entertainment",
+  "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
+dependencies = [
+  "ijson>=3.3,<4",
+  "mcp>=2,<3",
+  "pydantic>=2.12,<3",
+  "typing-extensions>=4.12,<5",
+]
+
+[project.optional-dependencies]
+bundle = [
+  "pyinstaller>=6.20,<7",
+]
+dev = [
+  "build>=1.2",
+  "coverage[toml]>=7.6",
+  "mypy>=1.14",
+  "pytest>=8.3",
+  "pytest-asyncio>=0.25",
+  "ruff>=0.9",
+]
+
+[project.scripts]
+reframework-mcp = "reframework_mcp.cli:main"
+reframework-mcp-console = "reframework_mcp.console:main"
+
+[project.urls]
+Homepage = "https://github.com/dzxrly/REFramework-MCP"
+Repository = "https://github.com/dzxrly/REFramework-MCP"
+Documentation = "https://github.com/dzxrly/REFramework-MCP#readme"
+Issues = "https://github.com/dzxrly/REFramework-MCP/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/reframework_mcp"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["reframework_mcp"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["reframework_mcp"]
+
+[[tool.mypy.overrides]]
+module = ["ijson"]
+ignore_missing_imports = true

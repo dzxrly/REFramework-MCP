@@ -1,0 +1,79 @@
+name: Package
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-runtime:
+    name: Package verified REF Nightly runtime
+    runs-on: windows-2022
+    timeout-minutes: 150
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve verified REF Nightly baseline
+        id: baseline
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $baseline = Get-Content -LiteralPath "reframework\nightly-baseline.json" -Raw |
+            ConvertFrom-Json
+          "commit=$($baseline.commit)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "tag=$($baseline.tag)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "release_number=$($baseline.release_number)" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Check out verified REF Nightly source
+        uses: actions/checkout@v4
+        with:
+          repository: praydog/REFramework
+          ref: ${{ steps.baseline.outputs.commit }}
+          path: reframework-source
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Build the single aligned runtime package
+        shell: pwsh
+        env:
+          NIGHTLY_TAG: ${{ steps.baseline.outputs.tag }}
+          NIGHTLY_SHA: ${{ steps.baseline.outputs.commit }}
+          NIGHTLY_NUMBER: ${{ steps.baseline.outputs.release_number }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $parameters = @{
+            REFrameworkRoot = "$env:GITHUB_WORKSPACE\reframework-source"
+            NightlyTag = $env:NIGHTLY_TAG
+            SourceCommit = $env:NIGHTLY_SHA
+            ReleaseNumber = $env:NIGHTLY_NUMBER
+            OutputDirectory = $env:GITHUB_WORKSPACE
+          }
+          .\scripts\build_ref_nightly_alignment.ps1 @parameters
+
+      - name: Upload build diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ref-nightly-${{ steps.baseline.outputs.release_number }}-package-diagnostics
+          path: .tmp/nightly-diagnostics
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload the aligned runtime package
+        uses: actions/upload-artifact@v4
+        with:
+          name: reframework-mcp-1.0.0-ref-nightly-${{ steps.baseline.outputs.release_number }}-windows-x64
+          path: |
+            reframework-mcp-1.0.0-ref-nightly-${{ steps.baseline.outputs.release_number }}-windows-x64.zip
+            reframework-mcp-1.0.0-ref-nightly-${{ steps.baseline.outputs.release_number }}-windows-x64.zip.sha256
+          if-no-files-found: error

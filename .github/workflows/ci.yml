@@ -1,0 +1,184 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+        python-version:
+          - "3.11"
+          - "3.13"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+
+      - name: Lint
+        run: python -m ruff check .
+
+      - name: Format check
+        run: python -m ruff format --check .
+
+      - name: Type check
+        run: python -m mypy src
+
+      - name: Test
+        run: python -m pytest -q
+
+      - name: Verify frozen schemas
+        run: >-
+          python scripts/export_schemas.py
+          --output .tmp/tool-contracts-v1.json
+          --check-digest schemas/tool-contracts-v1.sha256
+
+      - name: Build Python package
+        run: python -m build
+
+      - name: Build frozen console executable
+        if: ${{ matrix.os == 'windows-latest' && matrix.python-version == '3.13' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python -m pip install -e ".[bundle]"
+          if ($LASTEXITCODE -ne 0) { throw "Installing bundle dependencies failed." }
+          $arguments = @(
+            "--noconfirm",
+            "--clean",
+            "--onefile",
+            "--console",
+            "--name", "REFramework-MCP",
+            "--copy-metadata", "mcp",
+            "--distpath", ".tmp\console-dist",
+            "--workpath", ".tmp\console-build",
+            "--specpath", ".tmp",
+            "$env:GITHUB_WORKSPACE\scripts\reframework_mcp_console.py"
+          )
+          python -m PyInstaller @arguments
+          if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed." }
+          & ".\.tmp\console-dist\REFramework-MCP.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "Frozen console smoke test failed." }
+
+  cpp:
+    name: Patched REFramework and bridge
+    runs-on: windows-2022
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve verified REF Nightly baseline
+        id: baseline
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $baseline = Get-Content -LiteralPath "reframework\nightly-baseline.json" -Raw |
+            ConvertFrom-Json
+          "commit=$($baseline.commit)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Check out pinned REFramework
+        uses: actions/checkout@v4
+        with:
+          repository: praydog/REFramework
+          ref: ${{ steps.baseline.outputs.commit }}
+          path: reframework-source
+          submodules: recursive
+
+      - name: Check out baseline for semantic adapter comparison
+        uses: actions/checkout@v4
+        with:
+          repository: praydog/REFramework
+          ref: ${{ steps.baseline.outputs.commit }}
+          path: reframework-semantic-source
+          submodules: false
+
+      - name: Check adapter patch
+        shell: pwsh
+        run: >-
+          git -C reframework-source apply --check
+          "$env:GITHUB_WORKSPACE\reframework\export_service\reframework-684ca773-export-service.patch"
+
+      - name: Apply Export and Probe service adapter
+        shell: pwsh
+        run: >-
+          .\reframework\export_service\install.ps1
+          -REFrameworkRoot "$env:GITHUB_WORKSPACE\reframework-source"
+
+      - name: Verify semantic adapter is byte-identical
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $parameters = @{
+            REFrameworkRoot = "$env:GITHUB_WORKSPACE\reframework-semantic-source"
+          }
+          .\reframework\export_service\apply_compatible_adapter.ps1 @parameters
+          foreach ($file in @(
+            "CMakeLists.txt",
+            "cmake.toml",
+            "src\mods\tools\ObjectExplorer.hpp",
+            "src\mods\tools\ObjectExplorer.cpp"
+          )) {
+            $fixed = (Get-FileHash -LiteralPath (Join-Path "reframework-source" $file) -Algorithm SHA256).Hash
+            $semantic = (Get-FileHash -LiteralPath (Join-Path "reframework-semantic-source" $file) -Algorithm SHA256).Hash
+            if ($fixed -ne $semantic) {
+              throw "Semantic adapter differs from the verified patch: $file"
+            }
+          }
+
+      - name: Configure patched REFramework
+        shell: pwsh
+        run: >-
+          cmake -S reframework-source -B reframework-build
+          -G "Visual Studio 17 2022" -A x64
+          -DREF_BUILD_FRAMEWORK=ON
+
+      - name: Build patched REFramework
+        shell: pwsh
+        run: >-
+          cmake --build reframework-build
+          --config Release --parallel --target REFramework
+
+      - name: Configure bridge
+        shell: pwsh
+        run: >-
+          cmake -S . -B out/build
+          -G "Visual Studio 17 2022" -A x64
+          "-DREFRAMEWORK_ROOT=$env:GITHUB_WORKSPACE\reframework-source"
+
+      - name: Build bridge and adapter checks
+        shell: pwsh
+        run: >-
+          cmake --build out/build --config Release --parallel
+          --target reframework_mcp
+          reframework_export_service_syntax
+          reframework_probe_service_syntax
+
+      - name: Verify bridge artifact
+        shell: pwsh
+        run: |
+          $path = "out\build\bridge\Release\reframework_mcp.dll"
+          if (-not (Test-Path -LiteralPath $path)) {
+            throw "Missing bridge artifact: $path"
+          }

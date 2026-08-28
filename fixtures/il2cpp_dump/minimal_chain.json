@@ -1,0 +1,181 @@
+{
+  "app.SaveDataManager": {
+    "id": 1,
+    "parent": "via.Behavior",
+    "methods": {
+      "getCurrentUserSaveData100": {
+        "id": 100,
+        "params": [],
+        "returns": {"type": "app.UserSaveData"},
+        "function": "0x140001000"
+      }
+    },
+    "fields": {},
+    "properties": {
+      "CurrentUserSaveData": {
+        "id": 200,
+        "getter": "getCurrentUserSaveData",
+        "setter": ""
+      }
+    }
+  },
+  "app.UserSaveData": {
+    "id": 2,
+    "methods": {
+      "addSaveItem201": {
+        "id": 201,
+        "params": [
+          {"name": "itemId", "type": "System.Int32"},
+          {"name": "count", "type": "System.Int32"}
+        ],
+        "returns": {"type": "System.Boolean"},
+        "function": "0x140002010"
+      },
+      "addSaveItem202": {
+        "id": 202,
+        "params": [
+          {"name": "itemId", "type": "app.ItemId"},
+          {"name": "count", "type": "System.Int32"},
+          {"name": "notify", "type": "System.Boolean"}
+        ],
+        "returns": {"type": "System.Boolean"},
+        "function": "0x140002020"
+      },
+      "get_ItemCount203": {
+        "id": 203,
+        "params": [],
+        "returns": {"type": "System.Int32"},
+        "function": "0x140002030"
+      },
+      "set_ItemCount204": {
+        "id": 204,
+        "params": [
+          {"name": "value", "type": "System.Int32"}
+        ],
+        "returns": {"type": "System.Void"},
+        "function": "0x140002040"
+      }
+    },
+    "fields": {
+      "_Item": {
+        "id": 301,
+        "type": "app.cItemParam",
+        "offset_from_base": "0x20"
+      }
+    },
+    "properties": {
+      "Revision": {
+        "getter": "getRevision",
+        "setter": ""
+      }
+    },
+    "reflection_methods": {
+      "getRevision": {
+        "params": [],
+        "returns": "System.UInt32",
+        "function": "0x140002100"
+      }
+    },
+    "reflection_properties": {
+      "Revision": {
+        "type": "System.UInt32",
+        "getter": "0x140002100"
+      }
+    },
+    "RSZ": [
+      {"name": "_Item", "type": "app.cItemParam"}
+    ],
+    "deserializer_chain": [
+      {"name": "app.UserSaveDataDeserializer"}
+    ]
+  },
+  "app.cItemParam": {
+    "id": 3,
+    "methods": {},
+    "fields": {
+      "_BoxItem": {
+        "id": 302,
+        "type": "System.Array<app.ItemSlot>",
+        "offset_from_base": "0x10"
+      }
+    }
+  },
+  "System.Array<app.ItemSlot>": {
+    "id": 4,
+    "is_generic_type": true,
+    "generic_arguments": [
+      {"type": "app.ItemSlot"}
+    ],
+    "methods": {},
+    "fields": {}
+  },
+  "app.ItemSlot": {
+    "id": 5,
+    "methods": {},
+    "fields": {
+      "ItemIdFixed": {
+        "id": 303,
+        "type": "System.Int32",
+        "offset_from_base": "0x10"
+      },
+      "Num": {
+        "id": 304,
+        "type": "System.Int32",
+        "offset_from_base": "0x14"
+      }
+    }
+  },
+  "via.Behavior": {
+    "id": 6,
+    "methods": {},
+    "fields": {}
+  },
+  "System.Int32": {
+    "id": 7,
+    "methods": {},
+    "fields": {}
+  },
+  "System.Boolean": {
+    "id": 8,
+    "methods": {},
+    "fields": {}
+  },
+  "System.UInt32": {
+    "id": 9,
+    "methods": {},
+    "fields": {}
+  },
+  "app.ItemId": {
+    "id": 10,
+    "methods": {},
+    "fields": {}
+  },
+  "app.UserSaveDataDeserializer": {
+    "id": 11,
+    "methods": {},
+    "fields": {}
+  },
+  "System.Activator": {
+    "id": 13,
+    "methods": {
+      "CreateInstance401": {
+        "id": 401,
+        "params": [],
+        "returns": {"type": "!!0"},
+        "function": "0x140004010"
+      },
+      "CreateInstance402": {
+        "id": 402,
+        "params": [],
+        "returns": {"type": "!!0"},
+        "function": "0x140004020"
+      }
+    },
+    "fields": {}
+  },
+  "System.Void": {
+    "id": 12,
+    "methods": {},
+    "fields": {}
+  }
+}
