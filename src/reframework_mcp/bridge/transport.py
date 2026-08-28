@@ -15,6 +15,25 @@ from reframework_mcp.bridge.protocol import MAX_FRAME_BYTES
 from reframework_mcp.errors import ErrorCode, ReframeworkMCPError
 
 
+def _load_kernel32() -> Any:
+    """Load kernel32 without exposing Windows-only ctypes names to other platforms."""
+    win_dll = vars(ctypes).get("WinDLL")
+    if not callable(win_dll):
+        raise ReframeworkMCPError(
+            ErrorCode.BRIDGE_DISCONNECTED,
+            "The REFramework bridge named pipe is only available on Windows.",
+        )
+    return win_dll("kernel32", use_last_error=True)
+
+
+def _get_last_error() -> int:
+    """Return the calling thread's Win32 error, or zero off Windows."""
+    get_last_error = vars(ctypes).get("get_last_error")
+    if not callable(get_last_error):
+        return 0
+    return int(get_last_error())
+
+
 class BridgeTransport(Protocol):
     async def request(self, payload: dict[str, Any], timeout: float) -> dict[str, Any]: ...
 
@@ -61,14 +80,14 @@ class NamedPipeTransport:
             ) from error
 
     def _request_sync(self, payload: dict[str, Any]) -> dict[str, Any]:
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = _load_kernel32()
         wait_named_pipe = kernel32.WaitNamedPipeW
         wait_named_pipe.argtypes = [wintypes.LPCWSTR, wintypes.DWORD]
         wait_named_pipe.restype = wintypes.BOOL
 
         timeout_ms = max(1, int(self.connect_timeout * 1000))
         if not wait_named_pipe(self.pipe_name, timeout_ms):
-            error_code = ctypes.get_last_error()
+            error_code = _get_last_error()
             raise ReframeworkMCPError(
                 ErrorCode.BRIDGE_DISCONNECTED,
                 f"Bridge pipe is not available: {self.pipe_name}",
@@ -98,7 +117,7 @@ class NamedPipeTransport:
         )
         invalid_handle = wintypes.HANDLE(-1).value
         if handle == invalid_handle:
-            error_code = ctypes.get_last_error()
+            error_code = _get_last_error()
             raise ReframeworkMCPError(
                 ErrorCode.BRIDGE_DISCONNECTED,
                 "Failed to open the bridge pipe",
@@ -164,7 +183,7 @@ class NamedPipeTransport:
                 raise ReframeworkMCPError(
                     ErrorCode.BRIDGE_PROTOCOL_ERROR,
                     "Failed to write a bridge frame",
-                    details={"win32_error": ctypes.get_last_error()},
+                    details={"win32_error": _get_last_error()},
                     retryable=True,
                 )
             offset += written.value
@@ -190,7 +209,7 @@ class NamedPipeTransport:
                 raise ReframeworkMCPError(
                     ErrorCode.BRIDGE_PROTOCOL_ERROR,
                     "Bridge closed before the full frame was read",
-                    details={"win32_error": ctypes.get_last_error()},
+                    details={"win32_error": _get_last_error()},
                     retryable=True,
                 )
             chunks.append(buffer.raw[: read.value])
