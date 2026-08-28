@@ -1,7 +1,7 @@
 [server]
 transport = "stdio"
 host = "127.0.0.1"
-port = 8765
+port = 9966
 
 [bridge]
 pipe_name = "\\\\.\\pipe\\reframework-mcp-v1"

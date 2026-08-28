@@ -32,7 +32,7 @@ def _as_path(value: object, default: Path) -> Path:
 class ServerSettings:
     transport: str = "stdio"
     host: str = "127.0.0.1"
-    port: int = 8765
+    port: int = 9966
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,7 +103,7 @@ def load_settings(path: Path | None = None) -> Settings:
         server=ServerSettings(
             transport=str(server_data.get("transport", "stdio")),
             host=str(server_data.get("host", "127.0.0.1")),
-            port=int(server_data.get("port", 8765)),
+            port=int(server_data.get("port", 9966)),
         ),
         bridge=BridgeSettings(
             pipe_name=str(bridge_data.get("pipe_name", BridgeSettings().pipe_name)),

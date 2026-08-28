@@ -3,7 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import reframework_mcp.console as console
+from reframework_mcp.config import ServerSettings, load_settings
 from reframework_mcp.console import adjacent_config, prepare_arguments
+
+
+def test_default_http_port_is_9966(monkeypatch) -> None:
+    monkeypatch.delenv("REFMCP_PORT", raising=False)
+    assert ServerSettings().port == 9966
+    assert load_settings().server.port == 9966
 
 
 def test_double_click_defaults_to_local_streamable_http(tmp_path: Path) -> None:

@@ -14,6 +14,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $OutputDirectory,
 
+    [Parameter(Mandatory = $true)]
+    [string] $ReleaseId,
+
     [string] $PythonExecutable = "python"
 )
 
@@ -36,6 +39,13 @@ function Invoke-Checked {
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $refRoot = (Resolve-Path -LiteralPath $REFrameworkRoot).Path
 $outputRoot = [System.IO.Path]::GetFullPath($OutputDirectory)
+if ($SourceCommit -notmatch "^[0-9a-f]{40}$") {
+    throw "SourceCommit must be a full lowercase Git SHA."
+}
+if ($ReleaseId -notmatch "^[0-9a-f]{8}$") {
+    throw "ReleaseId must contain exactly eight lowercase hexadecimal characters."
+}
+$sourceShort = $SourceCommit.Substring(0, 8)
 $temporaryRoot = Join-Path $projectRoot ".tmp"
 $diagnosticsRoot = Join-Path $temporaryRoot "nightly-diagnostics"
 $adapterReportPath = Join-Path $diagnosticsRoot "adapter-report.json"
@@ -55,22 +65,25 @@ $dinputPath = $null
 $bridgePath = $null
 $hostPath = Join-Path $hostDist "REFramework-MCP.exe"
 $archivePath = Join-Path $outputRoot (
-    "reframework-mcp-$($baseline.mcp_version)-ref-nightly-$ReleaseNumber-windows-x64.zip"
+    "reframework-mcp-$($baseline.mcp_version)-ref-nightly-$ReleaseNumber-$sourceShort-$ReleaseId-windows-x64.zip"
 )
 
 Push-Location $projectRoot
 try {
     Invoke-Checked -FilePath $PythonExecutable -Arguments @(
-        "-m", "pip", "install", "-e", ".[dev,bundle]"
+        "-m", "pip", "install", "--upgrade", "pip"
+    ) -FailureMessage "Upgrading pip failed."
+    Invoke-Checked -FilePath $PythonExecutable -Arguments @(
+        "-m", "pip", "install", "--upgrade", "-e", ".[dev,bundle]"
     ) -FailureMessage "Installing Python dependencies failed."
     Invoke-Checked -FilePath $PythonExecutable -Arguments @(
         "-m", "pytest", "-q"
     ) -FailureMessage "Python tests failed."
     Invoke-Checked -FilePath $PythonExecutable -Arguments @(
-        "-m", "ruff", "check", "."
+        "-m", "ruff", "check", "src", "tests", "scripts"
     ) -FailureMessage "Ruff checks failed."
     Invoke-Checked -FilePath $PythonExecutable -Arguments @(
-        "-m", "ruff", "format", "--check", "."
+        "-m", "ruff", "format", "--check", "src", "tests", "scripts"
     ) -FailureMessage "Ruff formatting check failed."
     Invoke-Checked -FilePath $PythonExecutable -Arguments @(
         "-m", "mypy", "src"
@@ -180,8 +193,7 @@ try {
     }
     $gameRoot = Join-Path $stage "game"
     $pluginRoot = Join-Path $gameRoot "reframework\plugins"
-    $adapterRoot = Join-Path $stage "source-adapter"
-    New-Item -ItemType Directory -Force -Path $pluginRoot, $adapterRoot | Out-Null
+    New-Item -ItemType Directory -Force -Path $pluginRoot | Out-Null
 
     Copy-Item -LiteralPath $hostPath -Destination $stage
     Copy-Item -LiteralPath $dinputPath -Destination (Join-Path $gameRoot "dinput8.dll")
@@ -196,8 +208,6 @@ try {
     Copy-Item -LiteralPath (Join-Path $refRoot "LICENSE") -Destination (Join-Path $stage "REFramework-LICENSE")
     Copy-Item -LiteralPath (Join-Path $projectRoot "docs") -Destination $stage -Recurse
     Copy-Item -LiteralPath (Join-Path $projectRoot "reframework\nightly-baseline.json") -Destination (Join-Path $stage "source-baseline.json")
-    Copy-Item -LiteralPath (Join-Path $projectRoot "reframework\export_service") -Destination $adapterRoot -Recurse
-    Copy-Item -LiteralPath (Join-Path $projectRoot "reframework\probe_service") -Destination $adapterRoot -Recurse
 
     $report = [ordered]@{
         schema_version = 1
@@ -205,6 +215,7 @@ try {
         upstream_channel = "praydog/REFramework-nightly"
         official_nightly_tag = $NightlyTag
         source_commit = $SourceCommit
+        release_id = $ReleaseId
         baseline_tag = [string] $baseline.tag
         adapter_mode = $adapterMode
         mcp_version = [string] $baseline.mcp_version
@@ -232,6 +243,7 @@ try {
         upstream_channel = "praydog/REFramework-nightly"
         official_nightly_tag = $NightlyTag
         source_commit = $SourceCommit
+        release_id = $ReleaseId
         baseline_tag = [string] $baseline.tag
         adapter_mode = $adapterMode
         message = $_.Exception.Message
