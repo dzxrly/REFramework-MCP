@@ -1,4 +1,4 @@
-name: REF Nightly Release
+name: Release
 
 on:
   schedule:
