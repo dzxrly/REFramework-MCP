@@ -1,6 +1,8 @@
 #include "ProbeServiceV1.hpp"
 #include "ProbeServiceHooks.hpp"
 
+#include <reframework_mcp/version.hpp>
+
 #include <Windows.h>
 #include <bcrypt.h>
 
@@ -28,7 +30,7 @@ namespace {
 using json = nlohmann::json;
 using Clock = std::chrono::steady_clock;
 
-constexpr auto kProviderVersion = "1.0.1";
+constexpr auto kProviderVersion = reframework_mcp::kProjectVersion.data();
 constexpr std::size_t kMaxRuns = 64;
 constexpr std::size_t kMaximumOutputBytes = 1024u * 1024u;
 constexpr std::uint64_t kDefaultInstructionLimit = 1'000'000u;

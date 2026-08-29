@@ -2,15 +2,16 @@ name: Release
 
 on:
   schedule:
-    - cron: "17 4,16 * * *"
+    # 08:30 Beijing time (UTC+8), once per day.
+    - cron: "30 0 * * *"
   workflow_dispatch:
     inputs:
       nightly_tag:
         description: Optional official REFramework-nightly tag; defaults to latest
         required: false
         type: string
-      force_release:
-        description: Release even when the target is not newer than the verified baseline
+      force_build:
+        description: Build even when this Nightly already has a successful release
         required: false
         default: false
         type: boolean
@@ -23,180 +24,223 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: Check, build, and release
+  resolve:
+    name: Resolve release target
     runs-on: windows-2022
-    timeout-minutes: 180
+    timeout-minutes: 15
+    outputs:
+      should_build: ${{ steps.target.outputs.should_build }}
+      should_publish: ${{ steps.target.outputs.should_publish }}
+      source_commit: ${{ steps.target.outputs.source_commit }}
+      release_tag: ${{ steps.target.outputs.release_tag }}
 
     steps:
       - uses: actions/checkout@v7
 
-      - name: Resolve official REF Nightly
+      - name: Resolve official REF Nightly and release identity
         id: target
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           REQUESTED_TAG: ${{ inputs.nightly_tag }}
-          FORCE_RELEASE: ${{ inputs.force_release }}
+          FORCE_BUILD: ${{ inputs.force_build }}
         run: |
           $ErrorActionPreference = "Stop"
-          $headers = @{
-            Accept = "application/vnd.github+json"
-            Authorization = "Bearer $env:GH_TOKEN"
-            "X-GitHub-Api-Version" = "2022-11-28"
-          }
+          $forceBuild = $env:FORCE_BUILD -eq "true"
+          .\scripts\resolve_release_target.ps1 `
+            -OutputPath ".tmp\release-target.json" `
+            -Repository $env:GITHUB_REPOSITORY `
+            -RequestedTag $env:REQUESTED_TAG `
+            -ForceBuild:$forceBuild
 
-          if ([string]::IsNullOrWhiteSpace($env:REQUESTED_TAG)) {
-            $uri = "https://api.github.com/repos/praydog/REFramework-nightly/releases/latest"
-          } else {
-            $encodedTag = [Uri]::EscapeDataString($env:REQUESTED_TAG)
-            $uri = "https://api.github.com/repos/praydog/REFramework-nightly/releases/tags/$encodedTag"
-          }
-          $nightly = Invoke-RestMethod -Uri $uri -Headers $headers
-          $match = [regex]::Match(
-            [string] $nightly.tag_name,
-            "^nightly-(?<number>[0-9]+)-(?<sha>[0-9a-f]{40})$"
-          )
-          if (-not $match.Success) {
-            throw "Unexpected official REF Nightly tag: $($nightly.tag_name)"
-          }
-
-          $baseline = Get-Content -LiteralPath "reframework\nightly-baseline.json" -Raw |
+          $target = Get-Content -LiteralPath ".tmp\release-target.json" -Raw |
             ConvertFrom-Json
-          $number = $match.Groups["number"].Value
-          $sourceSha = $match.Groups["sha"].Value
-          $sourceShort = $sourceSha.Substring(0, 8)
-          $releaseHash = [Guid]::NewGuid().ToString("N").Substring(0, 8)
-          $releasePrefix = "v$($baseline.mcp_version)-ref-nightly-$number-$sourceShort"
-          $releaseTag = "$releasePrefix-$releaseHash"
-          $assetStem = "reframework-mcp-$($baseline.mcp_version)-ref-nightly-$number-$sourceShort-$releaseHash-windows-x64"
-
-          $releaseJson = & gh release list --repo $env:GITHUB_REPOSITORY --limit 1000 --json tagName
-          if ($LASTEXITCODE -ne 0) {
-            throw "Reading existing releases failed."
-          }
-          $existingReleases = @($releaseJson | ConvertFrom-Json)
-          $alreadyReleased = @(
-            $existingReleases |
-              Where-Object { ([string] $_.tagName).StartsWith("$releasePrefix-") }
-          ).Count -gt 0
-          $isUpdate = [long] $number -gt [long] $baseline.release_number
-          $forceRelease = $env:FORCE_RELEASE -eq "true"
-          $shouldRelease = $forceRelease -or ($isUpdate -and -not $alreadyReleased)
-
-          "should_release=$($shouldRelease.ToString().ToLowerInvariant())" |
-            Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "nightly_tag=$($nightly.tag_name)" |
-            Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "release_number=$number" |
-            Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "mcp_version=$($baseline.mcp_version)" |
-            Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "source_sha=$sourceSha" |
-            Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "release_hash=$releaseHash" |
-            Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "release_tag=$releaseTag" |
-            Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "asset_stem=$assetStem" |
-            Out-File -FilePath $env:GITHUB_OUTPUT -Append
-
-          if ($shouldRelease) {
-            $decision = "build and release"
-          } elseif ($alreadyReleased) {
-            $decision = "skip; this Nightly already has a release"
-          } else {
-            $decision = "skip; no newer Nightly was found"
-          }
           @"
-          ## REF Nightly check
+          ## REF Nightly target
 
-          - Target: $($nightly.tag_name)
-          - Source: $sourceSha
-          - Decision: $decision
+          - Target: $($target.nightly_tag)
+          - Source: $($target.source_commit)
+          - Release: $($target.release_tag)
+          - Decision: $($target.decision)
           "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
+      - name: Upload ReleaseTarget
+        if: ${{ steps.target.outputs.should_build == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-target
+          path: .tmp/release-target.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  compatibility:
+    name: Validate REF Nightly compatibility
+    needs: resolve
+    if: ${{ needs.resolve.outputs.should_build == 'true' }}
+    runs-on: windows-2022
+    timeout-minutes: 150
+
+    steps:
+      - uses: actions/checkout@v7
+
       - name: Check out official REF Nightly source
-        if: ${{ steps.target.outputs.should_release == 'true' }}
         uses: actions/checkout@v7
         with:
           repository: praydog/REFramework
-          ref: ${{ steps.target.outputs.source_sha }}
+          ref: ${{ needs.resolve.outputs.source_commit }}
           path: reframework-source
           submodules: recursive
 
+      - name: Download ReleaseTarget
+        uses: actions/download-artifact@v4
+        with:
+          name: release-target
+          path: .tmp
+
+      - name: Compile and verify REF Nightly
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          .\scripts\test_ref_nightly_compatibility.ps1 `
+            -REFrameworkRoot "$env:GITHUB_WORKSPACE\reframework-source" `
+            -ReleaseTargetPath "$env:GITHUB_WORKSPACE\.tmp\release-target.json"
+
+      - name: Summarize compatibility result
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          $reportPath = ".tmp\nightly-diagnostics\compatibility-report.json"
+          if (Test-Path -LiteralPath $reportPath) {
+            $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+            @"
+            ## REF Nightly compatibility
+
+            - Status: $($report.status)
+            - Stage: $($report.failure_stage)
+            - Target: $($report.official_nightly_tag)
+            - Source: $($report.source_commit)
+            - Adapter: $($report.adapter_mode)
+            "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          }
+
+      - name: Upload compatible runtime
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: compatible-runtime
+          path: .tmp/nightly-compatible-runtime
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload compatibility diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: compatibility-diagnostics-${{ github.run_id }}
+          path: .tmp/nightly-diagnostics
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
+
+  package-release:
+    name: Test, package, and release
+    needs:
+      - resolve
+      - compatibility
+    if: ${{ needs.resolve.outputs.should_build == 'true' && needs.compatibility.result == 'success' }}
+    runs-on: windows-2022
+    timeout-minutes: 75
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download ReleaseTarget
+        uses: actions/download-artifact@v4
+        with:
+          name: release-target
+          path: .tmp
+
+      - name: Download compatible runtime
+        uses: actions/download-artifact@v4
+        with:
+          name: compatible-runtime
+          path: .tmp/nightly-compatible-runtime
+
       - uses: actions/setup-python@v7
-        if: ${{ steps.target.outputs.should_release == 'true' }}
         with:
           python-version: "3.11"
           check-latest: true
           cache: pip
 
-      - name: Build release package
-        if: ${{ steps.target.outputs.should_release == 'true' }}
+      - name: Test and package release
         shell: pwsh
-        env:
-          NIGHTLY_TAG: ${{ steps.target.outputs.nightly_tag }}
-          NIGHTLY_SHA: ${{ steps.target.outputs.source_sha }}
-          NIGHTLY_NUMBER: ${{ steps.target.outputs.release_number }}
-          RELEASE_HASH: ${{ steps.target.outputs.release_hash }}
         run: |
           $ErrorActionPreference = "Stop"
-          $parameters = @{
-            REFrameworkRoot = "$env:GITHUB_WORKSPACE\reframework-source"
-            NightlyTag = $env:NIGHTLY_TAG
-            SourceCommit = $env:NIGHTLY_SHA
-            ReleaseNumber = $env:NIGHTLY_NUMBER
-            ReleaseId = $env:RELEASE_HASH
-            OutputDirectory = "$env:GITHUB_WORKSPACE\.tmp\release-output"
+          .\scripts\package_ref_nightly_release.ps1 `
+            -ReleaseTargetPath "$env:GITHUB_WORKSPACE\.tmp\release-target.json" `
+            -RuntimeDirectory "$env:GITHUB_WORKSPACE\.tmp\nightly-compatible-runtime" `
+            -OutputDirectory "$env:GITHUB_WORKSPACE\.tmp\release-output"
+
+      - name: Summarize package result
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          $reportPath = ".tmp\nightly-package-diagnostics\package-report.json"
+          if (Test-Path -LiteralPath $reportPath) {
+            $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+            @"
+            ## Release package
+
+            - Status: $($report.status)
+            - Stage: $($report.failure_stage)
+            - Release: $($report.release_tag)
+            - Archive: $($report.archive_name)
+            "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
           }
-          .\scripts\build_ref_nightly_alignment.ps1 @parameters
+
+      - name: Upload package diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-diagnostics-${{ github.run_id }}
+          path: .tmp/nightly-package-diagnostics
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Create GitHub release
-        if: ${{ steps.target.outputs.should_release == 'true' }}
+        if: ${{ success() && needs.resolve.outputs.should_publish == 'true' }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          NIGHTLY_TAG: ${{ steps.target.outputs.nightly_tag }}
-          NIGHTLY_SHA: ${{ steps.target.outputs.source_sha }}
-          MCP_VERSION: ${{ steps.target.outputs.mcp_version }}
-          RELEASE_HASH: ${{ steps.target.outputs.release_hash }}
-          RELEASE_TAG: ${{ steps.target.outputs.release_tag }}
-          ASSET_STEM: ${{ steps.target.outputs.asset_stem }}
         run: |
           $ErrorActionPreference = "Stop"
-          $archivePath = ".tmp\release-output\$env:ASSET_STEM.zip"
+          $target = Get-Content -LiteralPath ".tmp\release-target.json" -Raw |
+            ConvertFrom-Json
+          $archivePath = Join-Path ".tmp\release-output" $target.archive_name
           $digestPath = "$archivePath.sha256"
-          if (-not (Test-Path -LiteralPath $archivePath)) {
-            throw "Missing release archive: $archivePath"
+          foreach ($path in @($archivePath, $digestPath)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Missing release artifact: $path"
+            }
           }
-          if (-not (Test-Path -LiteralPath $digestPath)) {
-            throw "Missing release digest: $digestPath"
-          }
-
-          $notesPath = ".tmp\release-notes.md"
-          @"
-          Official REF Nightly: [$env:NIGHTLY_TAG](https://github.com/praydog/REFramework-nightly/releases/tag/$env:NIGHTLY_TAG)
-
-          Source commit: [$env:NIGHTLY_SHA](https://github.com/praydog/REFramework/commit/$env:NIGHTLY_SHA)
-
-          Build ID: $env:RELEASE_HASH
-          "@ | Set-Content -LiteralPath $notesPath -Encoding utf8NoBOM
 
           $releaseArguments = @(
             "release", "create",
-            $env:RELEASE_TAG,
+            [string] $target.release_tag,
             $archivePath,
             $digestPath,
             "--repo", $env:GITHUB_REPOSITORY,
             "--target", $env:GITHUB_SHA,
-            "--title", "REFramework-MCP $env:MCP_VERSION - REF Nightly $env:NIGHTLY_TAG - $env:RELEASE_HASH",
-            "--notes-file", $notesPath
+            "--title", [string] $target.release_title,
+            "--notes="
           )
           & gh @releaseArguments
           if ($LASTEXITCODE -ne 0) {
             throw "Creating the GitHub release failed."
           }
 
-          "Release: $env:RELEASE_TAG" |
+          "Release: $($target.release_tag)" |
             Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append

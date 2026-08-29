@@ -20,7 +20,7 @@ Explorer 中反复翻找类型、成员和调用链的时间。
 EXE 会打开控制台，并在 http://127.0.0.1:9966/mcp 提供 MCP。关闭窗口或按
 Ctrl+C 即可停止。打包版不需要另装 Python，也没有 GUI 或必填配置文件。
 
-每个 Release 的名称都带有 REF Nightly 编号、源码提交和 8 位构建 ID。
+每个 Release 的名称都带有 MCP 版本、REF Nightly 编号和源码提交。
 
 ## 连接 MCP 客户端
 
@@ -89,17 +89,25 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -e ".[dev,bundle]"
 
+$projectRoot = (Resolve-Path ".").Path
 $refSource = (Resolve-Path "..\REFramework").Path
-$baseline = Get-Content .\reframework\nightly-baseline.json -Raw | ConvertFrom-Json
-git -C $refSource checkout $baseline.commit
+$nightly = Invoke-RestMethod "https://api.github.com/repos/praydog/REFramework-nightly/releases/latest"
+$match = [regex]::Match([string] $nightly.tag_name, "^nightly-[0-9]+-(?<sha>[0-9a-f]{40})$")
+if (-not $match.Success) { throw "无法识别 REF Nightly tag：$($nightly.tag_name)" }
+$refCommit = $match.Groups["sha"].Value
+git -C $refSource fetch origin $refCommit
+git -C $refSource checkout $refCommit
 git -C $refSource submodule update --init --recursive
 
+cmake -S $projectRoot -B out\build -G "Visual Studio 17 2022" -A x64 "-DREFRAMEWORK_ROOT=$refSource"
+cmake --build out\build --config Release --target reframework_export_service_hostile_host_syntax
+
 .\reframework\export_service\install.ps1 -REFrameworkRoot $refSource
-cmake -S $refSource -B .tmp\ref-build -G "Visual Studio 17 2022" -A x64
+$injection = Join-Path $projectRoot "reframework\cmake\InjectServices.cmake"
+cmake -S $refSource -B .tmp\ref-build -G "Visual Studio 17 2022" -A x64 "-DREFMCP_PROJECT_ROOT=$projectRoot" "-DCMAKE_PROJECT_INCLUDE=$injection"
 cmake --build .tmp\ref-build --config Release --target REFramework
 
-cmake -S . -B out\build -G "Visual Studio 17 2022" -A x64 "-DREFRAMEWORK_ROOT=$refSource"
-cmake --build out\build --config Release --target reframework_mcp
+cmake --build out\build --config Release --target reframework_mcp reframework_export_service_syntax reframework_probe_service_syntax
 cmake --install out\build --config Release --prefix "<游戏目录>"
 ~~~
 
@@ -115,9 +123,10 @@ cmake --install out\build --config Release --prefix "<游戏目录>"
 
 ## 发布
 
-仓库只保留一个 GitHub Actions 工作流。它每天两次检查官方 REF Nightly，也可
-手动运行。发现新 Nightly 后，会完成测试、构建、打包并创建 GitHub Release；
-手动运行还可以指定 Nightly tag 或强制再次发布。
+仓库只保留一个 GitHub Actions 工作流。它每天北京时间 08:30 检查一次官方
+REF Nightly。Windows 兼容性任务会先完成语义适配和 REF 编译，随后才运行独立
+的 Python 测试与打包任务。兼容性失败时不会发布，并会在下一次定时任务中
+重试。手动运行还可以指定 Nightly tag，或强制重新构建但不创建重复 Release。
 
 ## 许可证
 

@@ -2,6 +2,6 @@
 
 from __future__ import annotations
 
-__all__ = ["__version__"]
+from reframework_mcp._version import __version__
 
-__version__ = "1.0.1"
+__all__ = ["__version__"]

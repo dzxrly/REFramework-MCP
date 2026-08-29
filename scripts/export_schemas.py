@@ -1,4 +1,4 @@
-"""Export the frozen C2 1.0.1 Tool, protocol and model JSON Schemas."""
+"""Export the frozen C2 Tool, protocol and model JSON Schemas."""
 
 from __future__ import annotations
 

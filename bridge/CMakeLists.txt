@@ -1,6 +1,21 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(reframework_mcp_bridge VERSION 1.0.1 LANGUAGES CXX)
+set(refmcp_project_root "${CMAKE_CURRENT_SOURCE_DIR}/..")
+include("${refmcp_project_root}/cmake/ReadProjectVersion.cmake")
+if(NOT DEFINED REFMCP_VERSION)
+    refmcp_read_project_version(
+        REFMCP_VERSION
+        "${refmcp_project_root}/src/reframework_mcp/_version.py"
+    )
+endif()
+if(NOT DEFINED REFMCP_GENERATED_INCLUDE_DIR)
+    set(REFMCP_GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/include")
+endif()
+refmcp_configure_version_header(
+    "${REFMCP_VERSION}"
+    "${REFMCP_GENERATED_INCLUDE_DIR}"
+)
+project(reframework_mcp_bridge VERSION "${REFMCP_VERSION}" LANGUAGES CXX)
 
 if(NOT WIN32)
     message(FATAL_ERROR "The REFramework-MCP Bridge only supports Windows")
@@ -36,6 +51,7 @@ target_compile_definitions(reframework_mcp PRIVATE
 target_include_directories(reframework_mcp
     PUBLIC
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${REFMCP_GENERATED_INCLUDE_DIR}"
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
         "${REFRAMEWORK_ROOT}/include"

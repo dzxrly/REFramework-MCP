@@ -1,5 +1,17 @@
 cmake_minimum_required(VERSION 3.25)
-project(REFrameworkMCP VERSION 1.0.1 LANGUAGES CXX)
+
+include(cmake/ReadProjectVersion.cmake)
+refmcp_read_project_version(
+    REFMCP_VERSION
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/reframework_mcp/_version.py"
+)
+project(REFrameworkMCP VERSION "${REFMCP_VERSION}" LANGUAGES CXX)
+
+set(REFMCP_GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/include")
+refmcp_configure_version_header(
+    "${REFMCP_VERSION}"
+    "${REFMCP_GENERATED_INCLUDE_DIR}"
+)
 
 add_subdirectory(bridge)
 
@@ -22,11 +34,46 @@ if(REFMCP_VALIDATE_EXPORT_SERVICE)
     target_include_directories(reframework_export_service_syntax PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/reframework/export_service"
         "${REFRAMEWORK_ROOT}/dependencies/nlohmann"
+        "${REFMCP_GENERATED_INCLUDE_DIR}"
     )
     if(MSVC)
         target_compile_options(
             reframework_export_service_syntax
             PRIVATE /W4 /permissive- /EHa /utf-8 /bigobj
+        )
+    endif()
+endif()
+
+option(
+    REFMCP_VALIDATE_HOSTILE_WINDOWS_HOST
+    "Compile the Export Service with active Windows min/max macros"
+    ON
+)
+if(REFMCP_VALIDATE_HOSTILE_WINDOWS_HOST)
+    add_library(reframework_export_service_hostile_host_syntax OBJECT EXCLUDE_FROM_ALL
+        reframework/export_service/ExportServiceV1.cpp
+    )
+    target_compile_features(reframework_export_service_hostile_host_syntax PRIVATE cxx_std_23)
+    target_compile_definitions(reframework_export_service_hostile_host_syntax PRIVATE
+        WIN32_LEAN_AND_MEAN
+        REFRAMEWORK_UNIVERSAL
+        TDB_DUMP_ALLOWED
+    )
+    target_include_directories(reframework_export_service_hostile_host_syntax PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/reframework/export_service"
+        "${REFRAMEWORK_ROOT}/dependencies/nlohmann"
+        "${REFMCP_GENERATED_INCLUDE_DIR}"
+    )
+    if(MSVC)
+        target_compile_options(
+            reframework_export_service_hostile_host_syntax
+            PRIVATE
+                /W4
+                /permissive-
+                /EHa
+                /utf-8
+                /bigobj
+                "/FI${CMAKE_CURRENT_SOURCE_DIR}/reframework/cmake/HostileWindowsHost.hpp"
         )
     endif()
 endif()
@@ -49,6 +96,7 @@ if(REFMCP_VALIDATE_PROBE_SERVICE)
         "${CMAKE_CURRENT_SOURCE_DIR}/reframework/probe_service"
         "${REFRAMEWORK_ROOT}/dependencies/nlohmann"
         "${REFRAMEWORK_ROOT}/dependencies/lua/src"
+        "${REFMCP_GENERATED_INCLUDE_DIR}"
     )
     if(MSVC)
         target_compile_options(

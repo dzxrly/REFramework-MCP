@@ -1,0 +1,9 @@
+#pragma once
+
+#include <string_view>
+
+namespace reframework_mcp {
+
+inline constexpr std::string_view kProjectVersion{"@REFMCP_VERSION@"};
+
+} // namespace reframework_mcp

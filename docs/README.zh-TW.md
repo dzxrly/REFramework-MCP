@@ -20,7 +20,7 @@ Object Explorer 中反覆尋找型別、成員與呼叫鏈的時間。
 EXE 會開啟主控台，並在 http://127.0.0.1:9966/mcp 提供 MCP。關閉視窗或按
 Ctrl+C 即可停止。封裝版不需要另外安裝 Python，也沒有 GUI 或必填設定檔。
 
-每個 Release 的名稱都包含 REF Nightly 編號、原始碼提交與 8 位建置 ID。
+每個 Release 的名稱都包含 MCP 版本、REF Nightly 編號與原始碼提交。
 
 ## 連接 MCP 用戶端
 
@@ -89,17 +89,25 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -e ".[dev,bundle]"
 
+$projectRoot = (Resolve-Path ".").Path
 $refSource = (Resolve-Path "..\REFramework").Path
-$baseline = Get-Content .\reframework\nightly-baseline.json -Raw | ConvertFrom-Json
-git -C $refSource checkout $baseline.commit
+$nightly = Invoke-RestMethod "https://api.github.com/repos/praydog/REFramework-nightly/releases/latest"
+$match = [regex]::Match([string] $nightly.tag_name, "^nightly-[0-9]+-(?<sha>[0-9a-f]{40})$")
+if (-not $match.Success) { throw "無法識別 REF Nightly tag：$($nightly.tag_name)" }
+$refCommit = $match.Groups["sha"].Value
+git -C $refSource fetch origin $refCommit
+git -C $refSource checkout $refCommit
 git -C $refSource submodule update --init --recursive
 
+cmake -S $projectRoot -B out\build -G "Visual Studio 17 2022" -A x64 "-DREFRAMEWORK_ROOT=$refSource"
+cmake --build out\build --config Release --target reframework_export_service_hostile_host_syntax
+
 .\reframework\export_service\install.ps1 -REFrameworkRoot $refSource
-cmake -S $refSource -B .tmp\ref-build -G "Visual Studio 17 2022" -A x64
+$injection = Join-Path $projectRoot "reframework\cmake\InjectServices.cmake"
+cmake -S $refSource -B .tmp\ref-build -G "Visual Studio 17 2022" -A x64 "-DREFMCP_PROJECT_ROOT=$projectRoot" "-DCMAKE_PROJECT_INCLUDE=$injection"
 cmake --build .tmp\ref-build --config Release --target REFramework
 
-cmake -S . -B out\build -G "Visual Studio 17 2022" -A x64 "-DREFRAMEWORK_ROOT=$refSource"
-cmake --build out\build --config Release --target reframework_mcp
+cmake --build out\build --config Release --target reframework_mcp reframework_export_service_syntax reframework_probe_service_syntax
 cmake --install out\build --config Release --prefix "<遊戲目錄>"
 ~~~
 
@@ -112,6 +120,13 @@ cmake --install out\build --config Release --prefix "<遊戲目錄>"
 .\.venv\Scripts\python.exe -m mypy src
 .\.venv\Scripts\python.exe -m build
 ~~~
+
+## 發布
+
+倉庫只保留一個 GitHub Actions 工作流程。它每天北京時間 08:30 檢查一次官方
+REF Nightly。Windows 相容性工作會先完成語意適配與 REF 編譯，之後才執行
+獨立的 Python 測試及封裝工作。相容性失敗時不會發布，並會在下一次排程中
+重試。手動執行也可以指定 Nightly tag，或強制重新建置但不建立重複 Release。
 
 ## 授權條款
 

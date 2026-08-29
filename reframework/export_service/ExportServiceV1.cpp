@@ -1,6 +1,8 @@
 #include "ExportServiceV1.hpp"
 #include "ExportServiceHooks.hpp"
 
+#include <reframework_mcp/version.hpp>
+
 #include <Windows.h>
 #include <bcrypt.h>
 
@@ -29,7 +31,7 @@ namespace {
 using json = nlohmann::json;
 namespace fs = std::filesystem;
 
-constexpr auto kProviderVersion = "1.0.1";
+constexpr auto kProviderVersion = reframework_mcp::kProjectVersion.data();
 
 std::wstring widen(const std::string& value) {
     if (value.empty()) return {};
@@ -213,7 +215,7 @@ double overall_export_progress(int stage, double stage_progress) {
     constexpr double stage_count = 10.0;
     const auto bounded_stage = std::clamp(stage, 0, 9);
     const auto bounded_progress = std::clamp(stage_progress, 0.0, 1.0);
-    return std::min(
+    return (std::min)(
         export_weight,
         ((static_cast<double>(bounded_stage) + bounded_progress) / stage_count)
             * export_weight);
@@ -406,7 +408,7 @@ json ExportService::status(const json& request) {
         m_status["state"] = "exporting";
         m_status["stage"] = stage_name(stage);
         m_status["stage_progress"] = stage_progress;
-        m_status["overall_progress"] = std::max(previous, weighted);
+        m_status["overall_progress"] = (std::max)(previous, weighted);
         m_status["processed_entities"] =
             processed_entities(tdb, stage, stage_progress);
         m_status["total_entities"] = total_entities(tdb);

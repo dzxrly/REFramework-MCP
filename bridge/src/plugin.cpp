@@ -1,5 +1,7 @@
 #include "bridge.hpp"
 
+#include <reframework_mcp/protocol.hpp>
+
 #include <reframework/API.hpp>
 
 #include <memory>
@@ -37,7 +39,9 @@ extern "C" __declspec(dllexport) bool reframework_plugin_initialize(
         }
         g_bridge->start();
         parameter->functions->log_info(
-            "[REFramework-MCP] Bridge 1.0.1 started on protocol 1.0");
+            "[REFramework-MCP] Bridge %s started on protocol %s",
+            reframework_mcp::kBridgeVersion.data(),
+            reframework_mcp::kProtocolVersion.data());
         return true;
     } catch (const std::exception& error) {
         if (parameter->functions->log_error != nullptr) {

@@ -22,8 +22,8 @@ The EXE opens a console and serves MCP at http://127.0.0.1:9966/mcp. Close the
 window or press Ctrl+C to stop it. The packaged build does not need Python, a
 GUI, or a config file.
 
-Each release name includes its REF Nightly number, source commit, and an
-eight-character build ID.
+Each release name includes its MCP version, REF Nightly number, and source
+commit.
 
 ## Connect an MCP client
 
@@ -95,17 +95,25 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -e ".[dev,bundle]"
 
+$projectRoot = (Resolve-Path ".").Path
 $refSource = (Resolve-Path "..\REFramework").Path
-$baseline = Get-Content .\reframework\nightly-baseline.json -Raw | ConvertFrom-Json
-git -C $refSource checkout $baseline.commit
+$nightly = Invoke-RestMethod "https://api.github.com/repos/praydog/REFramework-nightly/releases/latest"
+$match = [regex]::Match([string] $nightly.tag_name, "^nightly-[0-9]+-(?<sha>[0-9a-f]{40})$")
+if (-not $match.Success) { throw "Unexpected REF Nightly tag: $($nightly.tag_name)" }
+$refCommit = $match.Groups["sha"].Value
+git -C $refSource fetch origin $refCommit
+git -C $refSource checkout $refCommit
 git -C $refSource submodule update --init --recursive
 
+cmake -S $projectRoot -B out\build -G "Visual Studio 17 2022" -A x64 "-DREFRAMEWORK_ROOT=$refSource"
+cmake --build out\build --config Release --target reframework_export_service_hostile_host_syntax
+
 .\reframework\export_service\install.ps1 -REFrameworkRoot $refSource
-cmake -S $refSource -B .tmp\ref-build -G "Visual Studio 17 2022" -A x64
+$injection = Join-Path $projectRoot "reframework\cmake\InjectServices.cmake"
+cmake -S $refSource -B .tmp\ref-build -G "Visual Studio 17 2022" -A x64 "-DREFMCP_PROJECT_ROOT=$projectRoot" "-DCMAKE_PROJECT_INCLUDE=$injection"
 cmake --build .tmp\ref-build --config Release --target REFramework
 
-cmake -S . -B out\build -G "Visual Studio 17 2022" -A x64 "-DREFRAMEWORK_ROOT=$refSource"
-cmake --build out\build --config Release --target reframework_mcp
+cmake --build out\build --config Release --target reframework_mcp reframework_export_service_syntax reframework_probe_service_syntax
 cmake --install out\build --config Release --prefix "<game-directory>"
 ~~~
 
@@ -118,6 +126,15 @@ Run the project checks with:
 .\.venv\Scripts\python.exe -m mypy src
 .\.venv\Scripts\python.exe -m build
 ~~~
+
+## Releases
+
+GitHub Actions checks the latest official REF Nightly once per day at 08:30
+Beijing time. The Windows compatibility job adapts and compiles REF before the
+separate Python test and packaging job starts. A compatibility failure leaves
+the target unpublished and it is retried on the next scheduled run. Manual
+runs can select a Nightly tag or force a rebuild without creating a duplicate
+release.
 
 ## License
 

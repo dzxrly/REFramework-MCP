@@ -8,29 +8,18 @@ Set-StrictMode -Version Latest
 $lf = [string][char]10
 $crlf = ([string][char]13) + ([string][char]10)
 
-function Read-NormalizedText {
+function Read-SourceDocument {
     param([Parameter(Mandatory = $true)][string] $Path)
 
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Required REFramework file is missing: $Path"
+    }
     $raw = [System.IO.File]::ReadAllText($Path)
-    return @{
+    return [pscustomobject]@{
+        Path = $Path
         Text = $raw.Replace($script:crlf, $script:lf)
         UsesCrlf = $raw.Contains($script:crlf)
     }
-}
-
-function Write-NormalizedText {
-    param(
-        [Parameter(Mandatory = $true)][string] $Path,
-        [Parameter(Mandatory = $true)][string] $Text,
-        [Parameter(Mandatory = $true)][bool] $UsesCrlf
-    )
-
-    $output = if ($UsesCrlf) { $Text.Replace($script:lf, $script:crlf) } else { $Text }
-    [System.IO.File]::WriteAllText(
-        $Path,
-        $output,
-        [System.Text.UTF8Encoding]::new($false)
-    )
 }
 
 function Assert-UniqueLiteral {
@@ -42,7 +31,7 @@ function Assert-UniqueLiteral {
 
     $count = [regex]::Matches($Text, [regex]::Escape($Needle)).Count
     if ($count -ne 1) {
-        throw "Compatibility anchor '$Label' must occur exactly once; found $count."
+        throw "Required source contract '$Label' must occur exactly once; found $count."
     }
 }
 
@@ -58,80 +47,34 @@ function Replace-UniqueLiteral {
     return $Text.Replace($Old, $New)
 }
 
-function Insert-AfterUniqueLine {
-    param(
-        [Parameter(Mandatory = $true)][string] $Text,
-        [Parameter(Mandatory = $true)][string] $Pattern,
-        [Parameter(Mandatory = $true)][string[]] $Lines,
-        [Parameter(Mandatory = $true)][string] $Label
-    )
+function Test-FullyAdaptedHeader {
+    param([Parameter(Mandatory = $true)][string] $Text)
 
-    $matches = [regex]::Matches(
-        $Text,
-        $Pattern,
-        [System.Text.RegularExpressions.RegexOptions]::Multiline
-    )
-    if ($matches.Count -ne 1) {
-        throw "Compatibility anchor '$Label' must occur exactly once; found $($matches.Count)."
-    }
-
-    $match = $matches[0]
-    $indent = $match.Groups["indent"].Value
-    $addition = ($Lines | ForEach-Object { "$indent$_" }) -join $script:lf
-    return $Text.Insert($match.Index + $match.Length, "$($script:lf)$addition")
+    return $Text.Contains("    void generate_sdk_impl(bool skip_sdkgenny);") -and
+        $Text.Contains("    bool generate_sdk(bool skip_sdkgenny);") -and
+        $Text.Contains("    float sdk_dump_progress() const noexcept") -and
+        -not $Text.Contains("    void generate_sdk(bool skip_sdkgenny);")
 }
 
-function Update-TextFile {
-    param(
-        [Parameter(Mandatory = $true)][string] $Path,
-        [Parameter(Mandatory = $true)][scriptblock] $Transform
-    )
+function Test-FullyAdaptedSource {
+    param([Parameter(Mandatory = $true)][string] $Text)
 
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        throw "Required REFramework file is missing: $Path"
-    }
-    $document = Read-NormalizedText -Path $Path
-    $updated = & $Transform $document.Text
-    if ($updated -eq $document.Text) {
-        throw "Compatibility adapter made no change to required file: $Path"
-    }
-    Write-NormalizedText -Path $Path -Text $updated -UsesCrlf $document.UsesCrlf
+    return $Text.Contains('#include "ExportServiceHooks.hpp"') -and
+        $Text.Contains("bool ObjectExplorer::generate_sdk(const bool skip_sdkgenny) {") -and
+        $Text.Contains("void ObjectExplorer::generate_sdk_impl(const bool skip_sdkgenny) {") -and
+        -not $Text.Contains("void ObjectExplorer::generate_sdk(const bool skip_sdkgenny) {")
 }
 
-$root = (Resolve-Path -LiteralPath $REFrameworkRoot).Path
-$cmakePath = Join-Path $root "CMakeLists.txt"
-$cmakeTomlPath = Join-Path $root "cmake.toml"
-$explorerHeaderPath = Join-Path $root "src\mods\tools\ObjectExplorer.hpp"
-$explorerSourcePath = Join-Path $root "src\mods\tools\ObjectExplorer.cpp"
-$pluginLoaderPath = Join-Path $root "src\mods\PluginLoader.cpp"
+function Convert-ObjectExplorerHeader {
+    param([Parameter(Mandatory = $true)][string] $Text)
 
-$pluginLoader = (Read-NormalizedText -Path $pluginLoaderPath).Text
-Assert-UniqueLiteral -Text $pluginLoader -Needle "lua_State* reframework_create_script_state()" -Label "script state creation ABI"
-Assert-UniqueLiteral -Text $pluginLoader -Needle "void reframework_destroy_script_state(lua_State* lua_state)" -Label "script state destruction ABI"
+    $updated = Replace-UniqueLiteral -Text $Text -Old (
+        "    void generate_sdk(bool skip_sdkgenny);"
+    ) -New (
+        "    void generate_sdk_impl(bool skip_sdkgenny);"
+    ) -Label "private SDK generator declaration"
 
-Update-TextFile -Path $cmakePath -Transform {
-    param([string] $text)
-    $text = Insert-AfterUniqueLine -Text $text -Pattern '^(?<indent>[ \t]*)"src/mods/tools/ObjectExplorer\.hpp"[ \t]*$' -Lines @(
-        '"src/ExportServiceV1.cpp"',
-        '"src/ExportServiceV1.hpp"',
-        '"src/ExportServiceHooks.hpp"',
-        '"src/ProbeServiceV1.cpp"',
-        '"src/ProbeServiceV1.hpp"',
-        '"src/ProbeServiceHooks.hpp"'
-    ) -Label "REFramework source list"
-    return Insert-AfterUniqueLine -Text $text -Pattern '^(?<indent>[ \t]*)shlwapi[ \t]*$' -Lines @("bcrypt") -Label "REFramework link libraries"
-}
-
-Update-TextFile -Path $cmakeTomlPath -Transform {
-    param([string] $text)
-    return Insert-AfterUniqueLine -Text $text -Pattern '^(?<indent>[ \t]*)"shlwapi",[ \t]*$' -Lines @('"bcrypt",') -Label "cmake.toml REFramework link libraries"
-}
-
-Update-TextFile -Path $explorerHeaderPath -Transform {
-    param([string] $text)
-    $text = Replace-UniqueLiteral -Text $text -Old "    void generate_sdk(bool skip_sdkgenny);" -New "    void generate_sdk_impl(bool skip_sdkgenny);" -Label "private SDK generator declaration"
-
-    $publicAnchor = "    void on_lua_state_created(sol::state& lua) override;"
+    $publicDeclaration = "    void on_lua_state_created(sol::state& lua) override;"
     $publicMethods = @'
     void on_lua_state_created(sol::state& lua) override;
 
@@ -140,19 +83,31 @@ Update-TextFile -Path $explorerHeaderPath -Transform {
     float sdk_dump_progress() const noexcept { return m_sdk_dump_progress.load(); }
     int sdk_dump_stage() const noexcept { return static_cast<int>(m_sdk_dump_stage.load()); }
 '@
-    return Replace-UniqueLiteral -Text $text -Old $publicAnchor -New $publicMethods.TrimEnd() -Label "ObjectExplorer public API insertion"
+    return Replace-UniqueLiteral -Text $updated -Old $publicDeclaration -New (
+        $publicMethods.TrimEnd()
+    ) -Label "ObjectExplorer public API insertion"
 }
 
-Update-TextFile -Path $explorerSourcePath -Transform {
-    param([string] $text)
+function Convert-ObjectExplorerSource {
+    param([Parameter(Mandatory = $true)][string] $Text)
+
     $includeBlock = @'
 #include "ObjectExplorer.hpp"
 #include "ExportServiceHooks.hpp"
 '@
-    $text = Replace-UniqueLiteral -Text $text -Old '#include "ObjectExplorer.hpp"' -New $includeBlock.TrimEnd() -Label "Export Service include"
-    $text = Replace-UniqueLiteral -Text $text -Old ("    m_dumping_sdk = true;" + $script:lf) -New "" -Label "legacy SDK start flag"
-    $completionBlock = "    g_imethoddb.clear();" + $script:lf + $script:lf + "    m_dumping_sdk = false;" + $script:lf
-    $text = Replace-UniqueLiteral -Text $text -Old $completionBlock -New ("    g_imethoddb.clear();" + $script:lf) -Label "legacy SDK completion flag"
+    $updated = Replace-UniqueLiteral -Text $Text -Old (
+        '#include "ObjectExplorer.hpp"'
+    ) -New $includeBlock.TrimEnd() -Label "Export Service include"
+    $updated = Replace-UniqueLiteral -Text $updated -Old (
+        "    m_dumping_sdk = true;" + $script:lf
+    ) -New "" -Label "legacy SDK start flag"
+    $completionBlock = (
+        "    g_imethoddb.clear();" + $script:lf + $script:lf +
+        "    m_dumping_sdk = false;" + $script:lf
+    )
+    $updated = Replace-UniqueLiteral -Text $updated -Old $completionBlock -New (
+        "    g_imethoddb.clear();" + $script:lf
+    ) -Label "legacy SDK completion flag"
 
     $wrapper = @'
 bool ObjectExplorer::generate_sdk(const bool skip_sdkgenny) {
@@ -210,7 +165,124 @@ REFMCPExportTDBInfo reframework_export_tdb_info() noexcept {
 
 void ObjectExplorer::generate_sdk_impl(const bool skip_sdkgenny) {
 '@
-    return Replace-UniqueLiteral -Text $text -Old "void ObjectExplorer::generate_sdk(const bool skip_sdkgenny) {" -New $wrapper.TrimEnd() -Label "SDK generator definition"
+    return Replace-UniqueLiteral -Text $updated -Old (
+        "void ObjectExplorer::generate_sdk(const bool skip_sdkgenny) {"
+    ) -New $wrapper.TrimEnd() -Label "SDK generator definition"
 }
 
-Write-Output "Applied guarded semantic adapter to REFramework at $root."
+function Convert-ToOriginalNewlines {
+    param(
+        [Parameter(Mandatory = $true)][string] $Text,
+        [Parameter(Mandatory = $true)][bool] $UsesCrlf
+    )
+
+    if ($UsesCrlf) {
+        return $Text.Replace($script:lf, $script:crlf)
+    }
+    return $Text
+}
+
+function Commit-SourceUpdates {
+    param([Parameter(Mandatory = $true)][object[]] $Updates)
+
+    $encoding = [System.Text.UTF8Encoding]::new($false)
+    $transactionId = [Guid]::NewGuid().ToString("N")
+    $prepared = @()
+    $replaced = @()
+    try {
+        foreach ($update in $Updates) {
+            $temporaryPath = "$($update.Path).refmcp-$transactionId.tmp"
+            $backupPath = "$($update.Path).refmcp-$transactionId.bak"
+            $output = Convert-ToOriginalNewlines -Text $update.Text -UsesCrlf $update.UsesCrlf
+            [System.IO.File]::WriteAllText($temporaryPath, $output, $encoding)
+            if ([System.IO.File]::ReadAllText($temporaryPath) -ne $output) {
+                throw "Prepared adapter output verification failed: $($update.Path)"
+            }
+            $prepared += [pscustomobject]@{
+                Path = $update.Path
+                TemporaryPath = $temporaryPath
+                BackupPath = $backupPath
+            }
+        }
+
+        foreach ($item in $prepared) {
+            [System.IO.File]::Replace(
+                $item.TemporaryPath,
+                $item.Path,
+                $item.BackupPath,
+                $true
+            )
+            $replaced += $item
+        }
+    } catch {
+        for ($index = $replaced.Count - 1; $index -ge 0; $index--) {
+            $item = $replaced[$index]
+            if (Test-Path -LiteralPath $item.BackupPath -PathType Leaf) {
+                [System.IO.File]::Replace(
+                    $item.BackupPath,
+                    $item.Path,
+                    $null,
+                    $true
+                )
+            }
+        }
+        throw
+    } finally {
+        foreach ($item in $prepared) {
+            foreach ($path in @($item.TemporaryPath, $item.BackupPath)) {
+                if (Test-Path -LiteralPath $path -PathType Leaf) {
+                    Remove-Item -LiteralPath $path -Force
+                }
+            }
+        }
+    }
+}
+
+$root = (Resolve-Path -LiteralPath $REFrameworkRoot).Path
+$header = Read-SourceDocument -Path (
+    Join-Path $root "src\mods\tools\ObjectExplorer.hpp"
+)
+$source = Read-SourceDocument -Path (
+    Join-Path $root "src\mods\tools\ObjectExplorer.cpp"
+)
+
+$headerAdapted = Test-FullyAdaptedHeader -Text $header.Text
+$sourceAdapted = Test-FullyAdaptedSource -Text $source.Text
+if ($headerAdapted -or $sourceAdapted) {
+    if (-not ($headerAdapted -and $sourceAdapted)) {
+        throw "REFramework contains a partially applied MCP adapter; no files were changed."
+    }
+    [pscustomobject]@{
+        mode = "already-adapted"
+        modified_files = 0
+    }
+    return
+}
+
+$updatedHeader = Convert-ObjectExplorerHeader -Text $header.Text
+$updatedSource = Convert-ObjectExplorerSource -Text $source.Text
+if ($updatedHeader -eq $header.Text -or $updatedSource -eq $source.Text) {
+    throw "The compatibility adapter produced an incomplete update; no files were changed."
+}
+if (-not (Test-FullyAdaptedHeader -Text $updatedHeader) -or
+    -not (Test-FullyAdaptedSource -Text $updatedSource)) {
+    throw "The compatibility adapter output failed validation; no files were changed."
+}
+
+Commit-SourceUpdates -Updates @(
+    [pscustomobject]@{
+        Path = $header.Path
+        Text = $updatedHeader
+        UsesCrlf = $header.UsesCrlf
+    }
+    [pscustomobject]@{
+        Path = $source.Path
+        Text = $updatedSource
+        UsesCrlf = $source.UsesCrlf
+    }
+)
+
+[pscustomobject]@{
+    mode = "atomic-semantic-adapter"
+    modified_files = 2
+}

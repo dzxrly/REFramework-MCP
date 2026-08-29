@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "reframework-mcp"
-version = "1.0.1"
+dynamic = ["version"]
 description = "MCP server for exploring and testing RE Engine games through REFramework"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -62,6 +62,9 @@ Issues = "https://github.com/dzxrly/REFramework-MCP/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/reframework_mcp"]
+
+[tool.hatch.version]
+path = "src/reframework_mcp/_version.py"
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers"

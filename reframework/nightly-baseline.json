@@ -1,9 +1,0 @@
-{
-  "release_repository": "praydog/REFramework-nightly",
-  "source_repository": "praydog/REFramework",
-  "tag": "nightly-01397-684ca77369ec1050e844e8651a9b1d5b7c5aa370",
-  "release_number": "01397",
-  "commit": "684ca77369ec1050e844e8651a9b1d5b7c5aa370",
-  "verified_at": "2026-08-28",
-  "mcp_version": "1.0.1"
-}
