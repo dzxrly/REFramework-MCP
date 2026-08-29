@@ -221,7 +221,16 @@ json Bridge::dispatch_game_thread(const std::string& command, const json& payloa
                 m_export.capability_status(),
             };
         }
-        auto result = m_export.invoke(command, payload);
+        auto request = payload;
+        const auto* version = m_parameter->version;
+        request["_runtime_epoch"] = m_runtime_epoch;
+        request["_tdb_fingerprint"] = m_tdb_fingerprint;
+        request["_game_id"] =
+            version != nullptr && version->game_name != nullptr
+                ? version->game_name
+                : "unknown";
+        request["_reframework_version"] = version_string(version);
+        auto result = m_export.invoke(command, request);
         result["runtime_epoch"] = m_runtime_epoch;
         return result;
     }
@@ -343,6 +352,7 @@ json Bridge::list_singletons(const json& payload) {
                 {"type_name", name},
                 {"object_ref", m_objects.put_managed(object, type)},
                 {"runtime_epoch", m_runtime_epoch},
+                {"lease_seconds", 60},
             });
         }
     }
@@ -359,6 +369,7 @@ json Bridge::list_singletons(const json& payload) {
                 {"type_name", name},
                 {"object_ref", m_objects.put_native(singleton.instance, type, name)},
                 {"runtime_epoch", m_runtime_epoch},
+                {"lease_seconds", 60},
             });
         }
     }
@@ -539,10 +550,8 @@ json Bridge::invoke_method(const json& payload) {
     if (type == nullptr) {
         throw CommandError{"TYPE_NOT_FOUND", "Declaring type was not found"};
     }
-    auto* method = type->find_method(selector);
-    if (method == nullptr) {
-        method = type->find_method(selector.substr(0, selector.find('(')));
-    }
+    const auto arguments = payload.value("arguments", json::array());
+    auto* method = find_method_exact(type, selector, arguments.size());
     if (method == nullptr) {
         throw CommandError{
             "MEMBER_NOT_FOUND",
@@ -555,7 +564,7 @@ json Bridge::invoke_method(const json& payload) {
     }
     return {
         {"member_signature", payload["member_ref"]["canonical_signature"]},
-        {"result", invoke(method, object, payload.value("arguments", json::array()))},
+        {"result", invoke(method, object, arguments)},
     };
 }
 
@@ -597,6 +606,7 @@ json Bridge::set_field(const json& payload) {
 json Bridge::validate_access_plan(const json& payload) {
     const auto& plan = payload.at("plan");
     const auto allow_getters = payload.value("allow_getters", false);
+    const auto targets = plan.value("targets", std::vector<std::string>{});
     std::unordered_map<std::string, json> values;
     json steps = json::array();
     std::string failed_node;
@@ -620,7 +630,54 @@ json Bridge::validate_access_plan(const json& payload) {
                     }
                     value = {{"object_ref", m_objects.put_managed(
                         object,
-                        object->get_type_definition())}};
+                        object->get_type_definition())}, {"lease_seconds", 60}};
+                } else if (kind == "native_singleton") {
+                    const auto name = root.at("type_name").get<std::string>();
+                    bool found{};
+                    for (const auto& singleton :
+                         reframework::API::get()->get_native_singletons()) {
+                        auto* type = reinterpret_cast<
+                            reframework::API::TypeDefinition*>(singleton.t);
+                        const auto registered_name = singleton.name != nullptr
+                            ? std::string{singleton.name}
+                            : type != nullptr ? type->get_full_name() : std::string{};
+                        const auto type_name = type != nullptr
+                            ? type->get_full_name()
+                            : std::string{};
+                        if (registered_name != name && type_name != name) continue;
+                        if (singleton.instance == nullptr) {
+                            throw CommandError{
+                                "VALIDATION_FAILED",
+                                "Native singleton is null",
+                            };
+                        }
+                        value = {
+                            {"object_ref", m_objects.put_native(
+                                singleton.instance,
+                                type,
+                                registered_name)},
+                            {"lease_seconds", 60},
+                        };
+                        found = true;
+                        break;
+                    }
+                    if (!found) {
+                        throw CommandError{
+                            "TYPE_NOT_FOUND",
+                            "Native singleton was not found",
+                            {{"type_name", name}},
+                        };
+                    }
+                } else if (kind == "static_type") {
+                    const auto name = root.at("type_name").get<std::string>();
+                    if (reframework::API::get()->tdb()->find_type(name) == nullptr) {
+                        throw CommandError{
+                            "TYPE_NOT_FOUND",
+                            "Static root type was not found",
+                            {{"type_name", name}},
+                        };
+                    }
+                    value = {{"type", name}};
                 } else {
                     throw CommandError{
                         "CAPABILITY_UNAVAILABLE",
@@ -635,24 +692,170 @@ json Bridge::validate_access_plan(const json& payload) {
                 const auto object_ref = values.at(input).at("object_ref").get<std::string>();
                 const auto entry = require_object(object_ref);
                 const auto member = split_member_signature(node.at("member"));
+                if (entry.type == nullptr) {
+                    throw CommandError{
+                        "TYPE_NOT_FOUND",
+                        "Plan receiver has no type information",
+                    };
+                }
                 auto* field = entry.type->find_field(field_name(member.second));
                 if (field == nullptr) {
                     throw CommandError{"MEMBER_NOT_FOUND", "Plan field was not found"};
                 }
                 value = read_field(entry, field).at("value");
-            } else if (operation == "read_property" || operation == "call_method") {
-                if (!allow_getters) {
+            } else if (
+                operation == "read_property"
+                || operation == "call_method"
+                || operation == "call_static") {
+                json arguments = json::array();
+                for (const auto& argument_node : node.value("arguments", json::array())) {
+                    const auto argument_id = argument_node.get<std::string>();
+                    if (!values.contains(argument_id)) {
+                        throw CommandError{
+                            "PLAN_INVALID",
+                            "Method argument node has no validated value",
+                            {{"argument_node", argument_id}},
+                        };
+                    }
+                    arguments.push_back(values.at(argument_id));
+                }
+                reframework::API::ManagedObject* object{};
+                reframework::API::TypeDefinition* type{};
+                const auto member = split_member_signature(node.at("member"));
+                if (operation == "call_static") {
+                    type = reframework::API::get()->tdb()->find_type(member.first);
+                } else {
+                    const auto inputs = node.value("inputs", json::array());
+                    if (inputs.empty()) {
+                        throw CommandError{
+                            "PLAN_INVALID",
+                            "Instance method/property has no receiver node",
+                        };
+                    }
+                    const auto input = inputs.at(0).get<std::string>();
+                    if (!values.contains(input)
+                        || !values.at(input).is_object()
+                        || !values.at(input).contains("object_ref")) {
+                        throw CommandError{
+                            "PLAN_INVALID",
+                            "Method receiver did not resolve to an ObjectRef",
+                            {{"receiver_node", input}},
+                        };
+                    }
+                    const auto entry = require_object(
+                        values.at(input).at("object_ref").get<std::string>());
+                    object = entry.managed;
+                    type = entry.type;
+                }
+                if (type == nullptr) {
                     throw CommandError{
-                        "POLICY_DENIED",
-                        "Live getter/method validation requires allow_getters=true",
+                        "TYPE_NOT_FOUND",
+                        "Method/property declaring type was not found",
+                        {{"declaring_type", member.first}},
                     };
                 }
+
+                auto selector = member.second;
+                auto method_name = selector.substr(0, selector.find('('));
+                reframework::API::Method* method{};
+                if (operation == "read_property") {
+                    const auto property_name = field_name(selector);
+                    method_name = "get_" + property_name;
+                    method = find_method_by_arity(type, method_name, arguments.size());
+                    if (method == nullptr) {
+                        method_name = "is_" + property_name;
+                        method = find_method_by_arity(type, method_name, arguments.size());
+                    }
+                } else {
+                    method = find_method_exact(type, selector, arguments.size());
+                }
+                if (method == nullptr) {
+                    throw CommandError{
+                        "MEMBER_NOT_FOUND",
+                        "Plan method/property getter was not found",
+                        {
+                            {"selector", selector},
+                            {"declaring_type", member.first},
+                            {"argument_count", arguments.size()},
+                        },
+                    };
+                }
+                if (operation == "call_static" && !method->is_static()) {
+                    throw CommandError{
+                        "VALIDATION_FAILED",
+                        "call_static selected a non-static method",
+                    };
+                }
+                if (operation != "call_static" && method->is_static()) {
+                    throw CommandError{
+                        "VALIDATION_FAILED",
+                        "Instance operation selected a static method",
+                    };
+                }
+                if (!method->is_static() && object == nullptr) {
+                    throw CommandError{
+                        "CAPABILITY_UNAVAILABLE",
+                        "Native receivers cannot invoke managed methods",
+                    };
+                }
+
+                static_cast<void>(encode_arguments(method, arguments));
+                const auto is_target =
+                    std::ranges::find(targets, node_id) != targets.end();
+                const auto safe_getter =
+                    arguments.empty()
+                    && (method_name.starts_with("get_")
+                        || method_name.starts_with("is_"));
+                if (is_target) {
+                    value = {
+                        {"validated_call", true},
+                        {"member_signature",
+                            node.at("member").at("canonical_signature")},
+                        {"argument_count", arguments.size()},
+                        {"execution", "dry_run"},
+                    };
+                } else {
+                    if (!allow_getters) {
+                        throw CommandError{
+                            "POLICY_DENIED",
+                            "Intermediate getter execution requires allow_getters=true",
+                        };
+                    }
+                    if (!safe_getter) {
+                        throw CommandError{
+                            "CAPABILITY_UNAVAILABLE",
+                            "Only zero-argument getters may execute during live validation",
+                            {{"method", method_name}},
+                        };
+                    }
+                    value = invoke(method, object, arguments);
+                }
+            } else if (
+                operation == "assert_non_null"
+                || operation == "assert_type"
+                || operation == "assert_range"
+                || operation == "cast"
+                || operation == "emit") {
+                const auto inputs = node.value("inputs", json::array());
+                if (inputs.empty()) {
+                    throw CommandError{
+                        "PLAN_INVALID",
+                        "Validation operation has no input",
+                    };
+                }
+                value = values.at(inputs.at(0).get<std::string>());
+                if (operation == "assert_non_null" && value.is_null()) {
+                    throw CommandError{
+                        "VALIDATION_FAILED",
+                        "assert_non_null received null",
+                    };
+                }
+            } else {
                 throw CommandError{
                     "CAPABILITY_UNAVAILABLE",
-                    "Property/method plan execution requires explicit invocation arguments",
+                    "Live validation for this AccessPlan operation is unavailable",
+                    {{"operation", operation}},
                 };
-            } else {
-                value = node.value("value", json{});
             }
             values[node_id] = value;
             steps.push_back({
@@ -672,6 +875,16 @@ json Bridge::validate_access_plan(const json& payload) {
                 {"status", "invalid"},
                 {"expected_type", node.value("output_type", "")},
                 {"error_code", error.code},
+                {"message", error.what()},
+            });
+            break;
+        } catch (const std::exception& error) {
+            failed_node = node_id;
+            steps.push_back({
+                {"node_id", node_id},
+                {"status", "invalid"},
+                {"expected_type", node.value("output_type", "")},
+                {"error_code", "PLAN_INVALID"},
                 {"message", error.what()},
             });
             break;
@@ -718,6 +931,7 @@ json Bridge::inspect_entry(
     return {
         {"object_ref", object_ref},
         {"runtime_epoch", m_runtime_epoch},
+        {"lease_seconds", 60},
         {"type", entry.type_name},
         {"kind", entry.managed != nullptr ? "managed" : "native"},
         {"fields", std::move(fields)},
@@ -742,6 +956,36 @@ reframework::API::Method* Bridge::find_method_by_arity(
     }
     auto* method = type->find_method(name);
     return method != nullptr && method->get_num_params() == arity ? method : nullptr;
+}
+
+reframework::API::Method* Bridge::find_method_exact(
+    reframework::API::TypeDefinition* type,
+    const std::string& selector,
+    std::size_t arity) {
+    if (type == nullptr) return nullptr;
+    if (selector.find('(') == std::string::npos) {
+        return find_method_by_arity(type, selector, arity);
+    }
+    for (auto* method : type->get_methods()) {
+        if (method == nullptr || method->get_name() == nullptr
+            || method->get_num_params() != arity) {
+            continue;
+        }
+        std::ostringstream candidate;
+        candidate << method->get_name() << '(';
+        const auto parameters = method->get_params();
+        for (std::size_t index = 0; index < parameters.size(); ++index) {
+            if (index > 0) candidate << ", ";
+            auto* parameter_type = reinterpret_cast<
+                reframework::API::TypeDefinition*>(parameters[index].t);
+            candidate << (parameter_type != nullptr
+                ? parameter_type->get_full_name()
+                : std::string{});
+        }
+        candidate << ')';
+        if (candidate.str() == selector) return method;
+    }
+    return nullptr;
 }
 
 json Bridge::inspect_properties(
@@ -917,6 +1161,7 @@ json Bridge::read_value(void* raw, reframework::API::TypeDefinition* type) {
     return {
         {"object_ref", m_objects.put_managed(object, type)},
         {"type", name},
+        {"lease_seconds", 60},
     };
 }
 
@@ -962,9 +1207,8 @@ void Bridge::write_value(
     return store_value(raw, require_object(object_ref).managed);
 }
 
-json Bridge::invoke(
+std::vector<void*> Bridge::encode_arguments(
     reframework::API::Method* method,
-    reframework::API::ManagedObject* object,
     const json& arguments) {
     const auto parameters = method->get_params();
     if (!arguments.is_array() || arguments.size() != parameters.size()) {
@@ -979,23 +1223,61 @@ json Bridge::invoke(
     for (std::size_t index = 0; index < parameters.size(); ++index) {
         auto* type = reinterpret_cast<reframework::API::TypeDefinition*>(parameters[index].t);
         const auto name = type != nullptr ? type->get_full_name() : std::string{};
-        std::uint64_t bits{};
-        if (name == "System.Boolean") {
-            bits = arguments[index].get<bool>() ? 1u : 0u;
-        } else if (name == "System.Single") {
-            bits = std::bit_cast<std::uint32_t>(arguments[index].get<float>());
-        } else if (name == "System.Double") {
-            bits = std::bit_cast<std::uint64_t>(arguments[index].get<double>());
-        } else if (type != nullptr && (type->is_primitive() || type->is_enum())) {
-            bits = arguments[index].get<std::uint64_t>();
-        } else {
-            const auto object_ref = arguments[index].is_string()
-                ? arguments[index].get<std::string>()
-                : arguments[index].at("object_ref").get<std::string>();
-            bits = reinterpret_cast<std::uint64_t>(require_object(object_ref).managed);
+        try {
+            std::uint64_t bits{};
+            if (name == "System.Boolean") {
+                bits = arguments[index].get<bool>() ? 1u : 0u;
+            } else if (name == "System.Single") {
+                bits = std::bit_cast<std::uint32_t>(arguments[index].get<float>());
+            } else if (name == "System.Double") {
+                bits = std::bit_cast<std::uint64_t>(arguments[index].get<double>());
+            } else if (
+                name == "System.SByte"
+                || name == "System.Int16"
+                || name == "System.Int32"
+                || name == "System.Int64") {
+                bits = static_cast<std::uint64_t>(arguments[index].get<std::int64_t>());
+            } else if (type != nullptr && (type->is_primitive() || type->is_enum())) {
+                bits = arguments[index].get<std::uint64_t>();
+            } else if (arguments[index].is_null()) {
+                bits = 0;
+            } else {
+                const auto object_ref = arguments[index].is_string()
+                    ? arguments[index].get<std::string>()
+                    : arguments[index].at("object_ref").get<std::string>();
+                const auto entry = require_object(object_ref);
+                if (entry.managed == nullptr) {
+                    throw CommandError{
+                        "INVALID_REQUEST",
+                        "Managed method argument requires a managed ObjectRef",
+                        {{"index", index}, {"object_ref", object_ref}},
+                    };
+                }
+                bits = reinterpret_cast<std::uint64_t>(entry.managed);
+            }
+            encoded.push_back(reinterpret_cast<void*>(bits));
+        } catch (const CommandError&) {
+            throw;
+        } catch (const std::exception& error) {
+            throw CommandError{
+                "INVALID_REQUEST",
+                "Method argument cannot be encoded for the selected overload",
+                {
+                    {"index", index},
+                    {"expected_type", name},
+                    {"error", error.what()},
+                },
+            };
         }
-        encoded.push_back(reinterpret_cast<void*>(bits));
     }
+    return encoded;
+}
+
+json Bridge::invoke(
+    reframework::API::Method* method,
+    reframework::API::ManagedObject* object,
+    const json& arguments) {
+    const auto encoded = encode_arguments(method, arguments);
     const auto result = method->invoke(object, encoded);
     if (result.exception_thrown) {
         throw CommandError{"VALIDATION_FAILED", "Managed method threw an exception"};
@@ -1032,6 +1314,7 @@ json Bridge::return_value(
     return {
         {"object_ref", m_objects.put_managed(object, runtime_type)},
         {"type", runtime_type != nullptr ? runtime_type->get_full_name() : name},
+        {"lease_seconds", 60},
     };
 }
 

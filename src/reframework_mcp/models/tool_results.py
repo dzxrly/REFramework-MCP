@@ -28,6 +28,17 @@ class ToolFailure(TypedDict):
     error: ToolErrorDetail
 
 
+class ApprovalRequiredData(TypedDict):
+    state: Literal["approval_required"]
+    approval_ref: str
+    action: str
+    arguments_hash: str
+    runtime_epoch: str | None
+    expires_at: str
+    summary: NotRequired[dict[str, Any]]
+    elicitation_unavailable: NotRequired[bool]
+
+
 class RuntimeStatusData(TypedDict):
     server: dict[str, Any]
     bridge: dict[str, Any]
@@ -39,9 +50,19 @@ class RuntimeStatusData(TypedDict):
 
 class GenerateSdkData(TypedDict):
     state: str
+    bridge_state: NotRequired[str]
+    host_state: NotRequired[str]
+    terminal: NotRequired[bool]
     job_ref: NotRequired[str | None]
     runtime_epoch: NotRequired[str | None]
+    reframework_version: NotRequired[str | None]
+    tdb_fingerprint: NotRequired[str]
     progress: NotRequired[dict[str, Any]]
+    stage_progress: NotRequired[float]
+    overall_progress: NotRequired[float]
+    processed_entities: NotRequired[int]
+    total_entities: NotRequired[int]
+    host_progress: NotRequired[dict[str, Any]]
     artifacts: NotRequired[dict[str, Any]]
     snapshot_id: NotRequired[str | None]
     reused_snapshot_id: NotRequired[str | None]
@@ -173,6 +194,9 @@ class ProbeRunData(TypedDict):
     max_frames: int
     instructions: int
     max_instructions: int
+    instruction_granularity: NotRequired[int]
+    instruction_count_kind: NotRequired[str]
+    frames_kind: NotRequired[str]
     event_count: int
     dropped: int
     output_bytes: int
@@ -204,7 +228,7 @@ class HookRemoveData(TypedDict):
 
 ToolResult = ToolSuccess[Any] | ToolFailure
 RuntimeStatusResult = ToolSuccess[RuntimeStatusData] | ToolFailure
-GenerateSdkResult = ToolSuccess[GenerateSdkData] | ToolFailure
+GenerateSdkResult = ToolSuccess[GenerateSdkData | ApprovalRequiredData] | ToolFailure
 SearchTypesResult = ToolSuccess[SearchTypesData] | ToolFailure
 DescribeTypeResult = ToolSuccess[DescribeTypeData] | ToolFailure
 SearchMembersResult = ToolSuccess[SearchMembersData] | ToolFailure
@@ -216,8 +240,8 @@ AccessPathsResult = ToolSuccess[AccessPathsData] | ToolFailure
 PlanValidationResult = ToolSuccess[PlanValidationData] | ToolFailure
 LuaDraftResult = ToolSuccess[LuaDraftData] | ToolFailure
 LuaValidationResult = ToolSuccess[LuaValidationData] | ToolFailure
-InvokeMethodResult = ToolSuccess[InvokeMethodData] | ToolFailure
-SetFieldResult = ToolSuccess[SetFieldData] | ToolFailure
-ProbeRunResult = ToolSuccess[ProbeRunData] | ToolFailure
-HookInstallResult = ToolSuccess[HookInstallData] | ToolFailure
+InvokeMethodResult = ToolSuccess[InvokeMethodData | ApprovalRequiredData] | ToolFailure
+SetFieldResult = ToolSuccess[SetFieldData | ApprovalRequiredData] | ToolFailure
+ProbeRunResult = ToolSuccess[ProbeRunData | ApprovalRequiredData] | ToolFailure
+HookInstallResult = ToolSuccess[HookInstallData | ApprovalRequiredData] | ToolFailure
 HookRemoveResult = ToolSuccess[HookRemoveData] | ToolFailure

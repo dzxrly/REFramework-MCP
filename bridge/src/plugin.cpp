@@ -37,7 +37,7 @@ extern "C" __declspec(dllexport) bool reframework_plugin_initialize(
         }
         g_bridge->start();
         parameter->functions->log_info(
-            "[REFramework-MCP] Bridge 1.0.0 started on protocol 1.0");
+            "[REFramework-MCP] Bridge 1.0.1 started on protocol 1.0");
         return true;
     } catch (const std::exception& error) {
         if (parameter->functions->log_error != nullptr) {

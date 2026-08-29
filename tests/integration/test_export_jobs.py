@@ -110,6 +110,9 @@ def test_completed_export_is_indexed_and_activated(
     assert result["state"] == "completed"
     assert result["snapshot_id"] == "snapshot:generated"
     assert result["indexed"] is True
+    assert result["host_state"] == "completed"
+    assert result["terminal"] is True
+    assert result["host_progress"]["processed_entities"] > 0
     assert MetadataRepository(database).active_snapshot_id() == "snapshot:generated"
 
 
@@ -210,3 +213,49 @@ def test_reused_export_is_imported_when_host_database_is_empty(
     assert result["indexed"] is True
     assert result["activated"] is True
     assert MetadataRepository(database).active_snapshot_id() == "snapshot:reused"
+
+
+def test_reconcile_pending_reads_host_state_without_row_error(
+    tmp_path: Path,
+    fixture_root: Path,
+    monkeypatch,
+) -> None:
+    snapshots = tmp_path / "snapshots"
+    artifact_dir = snapshots / "mhwilds" / "sha256-test" / "pending"
+    artifact_dir.mkdir(parents=True)
+    dump_path = artifact_dir / "il2cpp_dump.json"
+    shutil.copyfile(
+        fixture_root / "il2cpp_dump" / "minimal_chain.json",
+        dump_path,
+    )
+    manifest_path = artifact_dir / "manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+    database = Database(tmp_path / "metadata.db")
+    database.initialize()
+    coordinator = ExportJobCoordinator(
+        database,
+        Il2CppDumpImporter(database),
+        CompletedExportBridge(dump_path, manifest_path),
+        snapshots,
+    )
+    coordinator.register(
+        {
+            "job_ref": "export:runtime:test:pending",
+            "state": "indexing",
+            "runtime_epoch": "runtime:test",
+        },
+        mode="json_only",
+        policy="reuse_if_fresh",
+        activate_snapshot=True,
+        index_after_export=True,
+    )
+    scheduled: list[str] = []
+    monkeypatch.setattr(
+        coordinator,
+        "_ensure_finalizer",
+        scheduled.append,
+    )
+
+    asyncio.run(coordinator.reconcile_pending_once())
+
+    assert scheduled == ["export:runtime:test:pending"]

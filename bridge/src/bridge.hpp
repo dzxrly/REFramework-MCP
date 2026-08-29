@@ -17,6 +17,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 namespace reframework_mcp {
 
@@ -76,6 +77,10 @@ private:
         reframework::API::TypeDefinition* type,
         const std::string& name,
         std::size_t arity);
+    static reframework::API::Method* find_method_exact(
+        reframework::API::TypeDefinition* type,
+        const std::string& selector,
+        std::size_t arity);
     nlohmann::json read_field(
         const ObjectEntry& entry,
         reframework::API::Field* field);
@@ -86,6 +91,9 @@ private:
         void* raw,
         reframework::API::TypeDefinition* type,
         const nlohmann::json& value);
+    std::vector<void*> encode_arguments(
+        reframework::API::Method* method,
+        const nlohmann::json& arguments);
     nlohmann::json invoke(
         reframework::API::Method* method,
         reframework::API::ManagedObject* object,

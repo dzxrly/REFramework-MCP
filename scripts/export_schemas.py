@@ -1,4 +1,4 @@
-"""Export the frozen C2 1.0.0 Tool, protocol and model JSON Schemas."""
+"""Export the frozen C2 1.0.1 Tool, protocol and model JSON Schemas."""
 
 from __future__ import annotations
 
@@ -78,6 +78,24 @@ def schema_bundle(data_dir: Path) -> dict[str, Any]:
                     "tdb_fingerprint": {"type": "string"},
                     "reframework_version": {"type": ["string", "null"]},
                     "runtime_epoch": {"type": ["string", "null"]},
+                    "entity_counts": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": [
+                            "types",
+                            "methods",
+                            "fields",
+                            "properties",
+                            "total",
+                        ],
+                        "properties": {
+                            "types": {"type": "integer", "minimum": 0},
+                            "methods": {"type": "integer", "minimum": 0},
+                            "fields": {"type": "integer", "minimum": 0},
+                            "properties": {"type": "integer", "minimum": 0},
+                            "total": {"type": "integer", "minimum": 0},
+                        },
+                    },
                     "provider": {"type": "string"},
                     "provider_version": {"type": "string"},
                     "mode": {"enum": ["json_only", "sdk_and_json"]},

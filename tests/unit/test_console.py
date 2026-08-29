@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import reframework_mcp.cli as cli
 import reframework_mcp.console as console
 from reframework_mcp.config import ServerSettings, load_settings
 from reframework_mcp.console import adjacent_config, prepare_arguments
@@ -73,3 +74,43 @@ def test_console_treats_ctrl_c_as_a_clean_shutdown(
 
     assert console.main(["serve"]) == 0
     assert "REFramework-MCP stopped." in capsys.readouterr().out
+
+
+def test_serve_overrides_are_applied_before_service_initialization(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeServices:
+        def __init__(self, settings) -> None:
+            captured["settings"] = settings
+
+    class FakeServer:
+        def run(self, **arguments) -> None:
+            captured["run"] = arguments
+
+    monkeypatch.setattr(cli, "ApplicationServices", FakeServices)
+    monkeypatch.setattr(cli, "create_server", lambda _services: FakeServer())
+
+    result = cli.main(
+        [
+            "serve",
+            "--transport",
+            "streamable-http",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "9988",
+        ]
+    )
+
+    settings = captured["settings"]
+    assert result == 0
+    assert settings.server.transport == "streamable-http"
+    assert settings.server.host == "0.0.0.0"
+    assert settings.server.port == 9988
+    assert captured["run"] == {
+        "transport": "streamable-http",
+        "host": "0.0.0.0",
+        "port": 9988,
+    }

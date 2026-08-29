@@ -7,6 +7,7 @@ import asyncio
 import json
 import sys
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from reframework_mcp import __version__
@@ -62,6 +63,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     command = args.command or "serve"
     settings = load_settings(args.config)
+    if command == "serve":
+        settings = replace(
+            settings,
+            server=replace(
+                settings.server,
+                transport=getattr(args, "transport", None) or settings.server.transport,
+                host=getattr(args, "host", None) or settings.server.host,
+                port=getattr(args, "port", None) or settings.server.port,
+            ),
+        )
     services = ApplicationServices(settings)
 
     if command == "import-dump":
@@ -93,13 +104,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(json.dumps(result, ensure_ascii=False), file=sys.stderr)
 
     mcp = create_server(services)
-    transport = getattr(args, "transport", None) or settings.server.transport
+    transport = settings.server.transport
     if transport == "stdio":
         mcp.run(transport="stdio")
     else:
         mcp.run(
             transport="streamable-http",
-            host=getattr(args, "host", None) or settings.server.host,
-            port=getattr(args, "port", None) or settings.server.port,
+            host=settings.server.host,
+            port=settings.server.port,
         )
     return 0

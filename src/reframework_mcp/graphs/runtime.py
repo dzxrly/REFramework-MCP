@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from reframework_mcp.storage import Database
@@ -24,6 +24,18 @@ def _canonical_hash(value: Any) -> str:
         default=str,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _lease_expiry(value: dict[str, Any], default_seconds: float = 60.0) -> str:
+    explicit = value.get("expires_at")
+    if isinstance(explicit, str) and explicit:
+        return explicit
+    try:
+        seconds = float(value.get("lease_seconds", default_seconds))
+    except (TypeError, ValueError):
+        seconds = default_seconds
+    seconds = min(max(seconds, 1.0), 3600.0)
+    return (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat()
 
 
 class RuntimeGraphStore:
@@ -50,6 +62,7 @@ class RuntimeGraphStore:
                     type_name,
                     "singleton_instance",
                     {"root_kind": root_kind},
+                    expires_at=_lease_expiry(item),
                 )
                 root_ref = self._synthetic_ref(epoch, "root", root_kind, type_name)
                 self._upsert_node(
@@ -91,6 +104,7 @@ class RuntimeGraphStore:
                         "field_count": len(list(_dict_items(node.get("fields")))),
                         "source": "inspect_object",
                     },
+                    expires_at=_lease_expiry(node),
                 )
                 for field in _dict_items(node.get("fields")):
                     value = field.get("value")
@@ -104,6 +118,7 @@ class RuntimeGraphStore:
                             target_type,
                             "runtime_object",
                             {"source": "field_value"},
+                            expires_at=_lease_expiry(value),
                         )
                         self._insert_edge(
                             connection,
@@ -417,7 +432,10 @@ class RuntimeGraphStore:
         if current_only and runtime_epoch:
             clauses.append("runtime_epoch = ?")
             params.append(runtime_epoch)
+        clauses.append("(expires_at IS NULL OR expires_at > ?)")
+        params.append(_now())
         with self.database.connect() as connection:
+            self._prune_expired(connection, runtime_epoch)
             rows = connection.execute(
                 f"""
                 SELECT node_ref, runtime_epoch, type_name, node_kind, value_json
@@ -433,6 +451,7 @@ class RuntimeGraphStore:
                 """,
                 params,
             ).fetchall()
+            connection.commit()
         seen: set[tuple[str, str]] = set()
         result: list[dict[str, Any]] = []
         for row in rows:
@@ -452,6 +471,12 @@ class RuntimeGraphStore:
                 }
             )
         return result
+
+    def prune_expired(self, runtime_epoch: str | None = None) -> int:
+        with self.database.connect() as connection:
+            removed = self._prune_expired(connection, runtime_epoch)
+            connection.commit()
+        return removed
 
     def hook_events(self, hook_ref: str, *, limit: int = 1000) -> dict[str, Any]:
         with self.database.connect() as connection:
@@ -577,6 +602,7 @@ class RuntimeGraphStore:
                 type_name,
                 node_kind,
                 metadata,
+                expires_at=_lease_expiry(value),
             )
         else:
             target_ref = self._synthetic_ref(epoch, "type", type_name or "unknown")
@@ -621,6 +647,7 @@ class RuntimeGraphStore:
                         type_name,
                         "probe_object",
                         {"probe_ref": probe_ref},
+                        expires_at=_lease_expiry(current),
                     )
                 stack.extend(current.values())
             elif isinstance(current, list):
@@ -639,17 +666,21 @@ class RuntimeGraphStore:
         type_name: str,
         node_kind: str,
         value: dict[str, Any],
+        *,
+        expires_at: str | None = None,
     ) -> None:
         connection.execute(
             """
             INSERT INTO runtime_nodes(
-                node_ref, runtime_epoch, type_name, node_kind, value_json
-            ) VALUES (?, ?, ?, ?, ?)
+                node_ref, runtime_epoch, type_name, node_kind, value_json, expires_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(node_ref) DO UPDATE SET
+                runtime_epoch=excluded.runtime_epoch,
                 type_name=CASE WHEN excluded.type_name <> ''
                     THEN excluded.type_name ELSE runtime_nodes.type_name END,
                 node_kind=excluded.node_kind,
-                value_json=excluded.value_json
+                value_json=excluded.value_json,
+                expires_at=COALESCE(excluded.expires_at, runtime_nodes.expires_at)
             """,
             (
                 node_ref,
@@ -657,8 +688,38 @@ class RuntimeGraphStore:
                 type_name or None,
                 node_kind,
                 json.dumps(value, ensure_ascii=False),
+                expires_at,
             ),
         )
+
+    @staticmethod
+    def _prune_expired(connection: Any, runtime_epoch: str | None) -> int:
+        now = _now()
+        epoch_clause = "runtime_epoch = ?" if runtime_epoch else "1 = 1"
+        params: tuple[Any, ...] = (runtime_epoch, now) if runtime_epoch else (now,)
+        expired_rows = connection.execute(
+            f"""
+            SELECT node_ref FROM runtime_nodes
+            WHERE {epoch_clause} AND expires_at IS NOT NULL AND expires_at <= ?
+            """,
+            params,
+        ).fetchall()
+        expired = [str(row["node_ref"]) for row in expired_rows]
+        if not expired:
+            return 0
+        placeholders = ",".join("?" for _ in expired)
+        connection.execute(
+            f"""
+            DELETE FROM runtime_edges
+            WHERE source_ref IN ({placeholders}) OR target_ref IN ({placeholders})
+            """,
+            (*expired, *expired),
+        )
+        connection.execute(
+            f"DELETE FROM runtime_nodes WHERE node_ref IN ({placeholders})",
+            expired,
+        )
+        return len(expired)
 
     @staticmethod
     def _insert_edge(

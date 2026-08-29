@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from reframework_mcp.graphs import RuntimeGraphStore
@@ -146,6 +147,10 @@ def test_planner_builds_multi_root_method_argument_dag(
     roots = [node for node in plan.nodes if node.operation is AccessOperation.RESOLVE_ROOT]
     target_node = next(node for node in plan.nodes if node.node_id == "target")
     assert len(roots) >= 2
+    singleton_root = next(node for node in roots if node.output_type == "app.SaveDataManager")
+    assert singleton_root.root is not None
+    assert singleton_root.root.kind.value == "managed_singleton"
+    assert singleton_root.root.object_ref is None
     assert len(target_node.arguments) == 3
     assert all(
         plan.nodes.index(next(node for node in plan.nodes if node.node_id == argument))
@@ -170,3 +175,51 @@ def test_usage_indexer_persists_explicit_graph_edges(
     assert "CODE_ACQUIRES_ROOT" in kinds
     assert "CODE_CALLS_MEMBER" in kinds
     assert "CODE_HOOKS_MEMBER" in kinds
+
+
+def test_expired_object_refs_are_pruned_from_runtime_graph(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "runtime-expiry.db")
+    database.initialize()
+    graph = RuntimeGraphStore(database)
+    graph.record_singletons(
+        {
+            "runtime_epoch": "runtime:test",
+            "items": [
+                {
+                    "kind": "managed_singleton",
+                    "type_name": "app.SaveDataManager",
+                    "object_ref": "obj:expired",
+                    "lease_seconds": 1,
+                }
+            ],
+        }
+    )
+    expired_at = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    with database.connect() as connection:
+        connection.execute(
+            "UPDATE runtime_nodes SET expires_at=? WHERE node_ref='obj:expired'",
+            (expired_at,),
+        )
+        connection.commit()
+
+    roots = graph.candidate_roots(
+        runtime_epoch="runtime:test",
+        current_only=True,
+    )
+
+    assert all(item["object_ref"] != "obj:expired" for item in roots)
+    with database.connect() as connection:
+        assert (
+            connection.execute("SELECT 1 FROM runtime_nodes WHERE node_ref='obj:expired'").fetchone() is None
+        )
+        assert (
+            connection.execute(
+                """
+                SELECT 1 FROM runtime_edges
+                WHERE source_ref='obj:expired' OR target_ref='obj:expired'
+                """
+            ).fetchone()
+            is None
+        )

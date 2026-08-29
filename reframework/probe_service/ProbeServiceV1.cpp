@@ -28,7 +28,7 @@ namespace {
 using json = nlohmann::json;
 using Clock = std::chrono::steady_clock;
 
-constexpr auto kProviderVersion = "1.0.0";
+constexpr auto kProviderVersion = "1.0.1";
 constexpr std::size_t kMaxRuns = 64;
 constexpr std::size_t kMaximumOutputBytes = 1024u * 1024u;
 constexpr std::uint64_t kDefaultInstructionLimit = 1'000'000u;
@@ -366,6 +366,9 @@ json status_json(const std::shared_ptr<ProbeRun>& run) {
         {"max_frames", run->max_frames},
         {"instructions", run->instructions},
         {"max_instructions", run->instruction_limit},
+        {"instruction_granularity", kInstructionHookStep},
+        {"instruction_count_kind", "sampled_lower_bound"},
+        {"frames_kind", "execution_frames"},
         {"event_count", run->events.size()},
         {"dropped", run->dropped},
         {"output_bytes", run->output_bytes},
@@ -424,6 +427,8 @@ json run_probe(const json& request) {
         code.size(),
         "reframework-mcp-probe");
     if (result == LUA_OK) {
+        run->frames = 1;
+        run->instructions = 1;
         result = lua_pcall(run->lua, 0, LUA_MULTRET, 0);
     }
     if (result != LUA_OK) {
@@ -466,7 +471,6 @@ void service_tick() {
         for (const auto& [_, run] : g_runs) {
             std::scoped_lock run_lock{run->mutex};
             if (run->state == "running") {
-                ++run->frames;
                 if (
                     run->frames >= run->max_frames
                     || Clock::now() >= run->deadline
@@ -474,6 +478,8 @@ void service_tick() {
                 ) {
                     run->state = "completed";
                     destroy.push_back(run);
+                } else {
+                    ++run->frames;
                 }
             } else if (
                 !run->destruction_requested

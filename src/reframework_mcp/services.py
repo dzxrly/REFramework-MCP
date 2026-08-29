@@ -7,8 +7,9 @@ import json
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
+from reframework_mcp import __version__
 from reframework_mcp.audit import AuditLog
 from reframework_mcp.bridge import BridgeClient, NamedPipeTransport
 from reframework_mcp.config import Settings
@@ -24,7 +25,7 @@ from reframework_mcp.metadata import (
     Il2CppDumpImporter,
     MetadataRepository,
 )
-from reframework_mcp.models import AccessPlan
+from reframework_mcp.models import AccessOperation, AccessPlan, MemberRef
 from reframework_mcp.planner import AccessPlanner, AccessPlanValidator
 from reframework_mcp.policy import ApprovalManager, PolicyEngine
 from reframework_mcp.search import MemberSearchService
@@ -88,7 +89,7 @@ class ApplicationServices:
         return success(
             {
                 "server": {
-                    "version": "1.0.0",
+                    "version": __version__,
                     "transport": self.settings.server.transport,
                     "database_path": str(self.settings.database_path),
                     "data_dir": str(self.settings.data_dir),
@@ -107,6 +108,7 @@ class ApplicationServices:
 
     def graph_status(self) -> dict[str, Any]:
         epoch = self.bridge.runtime_epoch
+        self.runtime_graph.prune_expired(epoch)
         with self.database.connect() as connection:
             runtime_nodes = int(
                 connection.execute(
@@ -290,6 +292,9 @@ class ApplicationServices:
     def require_live_plan_validation(
         self,
         validation_ref: str,
+        *,
+        action: str | None = None,
+        payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self.database.connect() as connection:
             row = connection.execute(
@@ -321,4 +326,182 @@ class ApplicationServices:
                 ErrorCode.PLAN_NOT_VALIDATED,
                 "Plan validation expired",
             )
+        if action is not None:
+            if payload is None:
+                raise ReframeworkMCPError(
+                    ErrorCode.INVALID_REQUEST,
+                    "Mutation payload is required when binding a plan validation",
+                )
+            plan = self.planner.load_plan(str(row["plan_ref"]))
+            self._require_plan_target_binding(plan, result, action, payload)
         return result
+
+    @staticmethod
+    def _require_plan_target_binding(
+        plan: AccessPlan,
+        validation: dict[str, Any],
+        action: str,
+        payload: dict[str, Any],
+    ) -> None:
+        expected_operations = {
+            "invoke_method": {
+                AccessOperation.CALL_METHOD,
+                AccessOperation.CALL_STATIC,
+            },
+            "set_field": {AccessOperation.READ_FIELD},
+        }.get(action)
+        if expected_operations is None:
+            raise ReframeworkMCPError(
+                ErrorCode.INVALID_REQUEST,
+                f"Unsupported plan-bound mutation: {action}",
+            )
+
+        try:
+            requested_member = MemberRef.model_validate(payload["member_ref"])
+        except Exception as error:
+            raise ReframeworkMCPError(
+                ErrorCode.INVALID_REQUEST,
+                "Mutation member_ref is invalid",
+                details={"error": str(error)},
+            ) from error
+
+        target_ids = set(plan.targets)
+        candidates = [
+            node
+            for node in plan.nodes
+            if node.node_id in target_ids
+            and node.operation in expected_operations
+            and node.member is not None
+            and node.member.canonical_signature == requested_member.canonical_signature
+        ]
+        if len(candidates) != 1:
+            ApplicationServices._plan_target_mismatch(
+                "The validation is not bound to exactly one matching mutation target",
+                action=action,
+                requested_member=requested_member.canonical_signature,
+                candidate_targets=[
+                    node.node_id
+                    for node in plan.nodes
+                    if node.node_id in target_ids and node.operation in expected_operations
+                ],
+            )
+        target = candidates[0]
+        assert target.member is not None
+        if (
+            target.member.snapshot_id != requested_member.snapshot_id
+            or target.member.kind != requested_member.kind
+            or (
+                target.member.member_id is not None
+                and requested_member.member_id is not None
+                and target.member.member_id != requested_member.member_id
+            )
+        ):
+            ApplicationServices._plan_target_mismatch(
+                "Mutation member_ref differs from the validated target",
+                action=action,
+                target=target.member.model_dump(mode="json"),
+                requested=requested_member.model_dump(mode="json"),
+            )
+
+        steps = {
+            str(step.get("node_id")): step
+            for step in validation.get("steps", [])
+            if isinstance(step, dict) and step.get("node_id")
+        }
+        actual_object_ref = payload.get("object_ref")
+        if target.operation is AccessOperation.CALL_STATIC:
+            if actual_object_ref is not None:
+                ApplicationServices._plan_target_mismatch(
+                    "A static validated target cannot be invoked with object_ref",
+                    action=action,
+                    actual_object_ref=actual_object_ref,
+                )
+        else:
+            if not target.inputs:
+                ApplicationServices._plan_target_mismatch(
+                    "Validated instance target has no receiver node",
+                    action=action,
+                    target_node=target.node_id,
+                )
+            receiver_step = steps.get(target.inputs[0], {})
+            summary = receiver_step.get("value_summary")
+            expected_object_ref = receiver_step.get("object_ref") or (
+                summary.get("object_ref") if isinstance(summary, dict) else None
+            )
+            if not expected_object_ref or actual_object_ref != expected_object_ref:
+                ApplicationServices._plan_target_mismatch(
+                    "Mutation object_ref differs from the live-validated receiver",
+                    action=action,
+                    expected_object_ref=expected_object_ref,
+                    actual_object_ref=actual_object_ref,
+                    receiver_node=target.inputs[0],
+                )
+
+        if action != "invoke_method":
+            return
+        nodes = {node.node_id: node for node in plan.nodes}
+        expected_arguments: list[Any] = []
+        for argument_node_id in target.arguments:
+            argument_node = nodes[argument_node_id]
+            if (
+                bool(argument_node.options.get("placeholder"))
+                or bool(argument_node.options.get("requires_user_value"))
+                or bool(argument_node.options.get("constructor_unresolved"))
+            ):
+                ApplicationServices._plan_target_mismatch(
+                    "Validated target still contains an unresolved argument",
+                    action=action,
+                    argument_node=argument_node_id,
+                )
+            argument_step = steps.get(argument_node_id)
+            if argument_step is None or argument_step.get("status") != "valid":
+                ApplicationServices._plan_target_mismatch(
+                    "Mutation argument was not live-validated",
+                    action=action,
+                    argument_node=argument_node_id,
+                )
+            expected_arguments.append(argument_step.get("value_summary"))
+
+        actual_arguments = payload.get("arguments", [])
+        if not isinstance(actual_arguments, list):
+            ApplicationServices._plan_target_mismatch(
+                "Mutation arguments must be an array",
+                action=action,
+            )
+        expected_canonical = ApplicationServices._canonical_bound_value(expected_arguments)
+        actual_canonical = ApplicationServices._canonical_bound_value(actual_arguments)
+        if expected_canonical != actual_canonical:
+            ApplicationServices._plan_target_mismatch(
+                "Mutation arguments differ from the live-validated plan",
+                action=action,
+                expected_arguments=expected_arguments,
+                actual_arguments=actual_arguments,
+            )
+
+    @staticmethod
+    def _canonical_bound_value(value: Any) -> str:
+        def normalize(item: Any) -> Any:
+            if isinstance(item, str) and item.startswith("obj:"):
+                return {"object_ref": item}
+            if isinstance(item, dict):
+                if item.get("object_ref"):
+                    return {"object_ref": str(item["object_ref"])}
+                return {str(key): normalize(child) for key, child in item.items()}
+            if isinstance(item, list):
+                return [normalize(child) for child in item]
+            return item
+
+        return json.dumps(
+            normalize(value),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    @staticmethod
+    def _plan_target_mismatch(message: str, **details: Any) -> NoReturn:
+        raise ReframeworkMCPError(
+            ErrorCode.PLAN_TARGET_MISMATCH,
+            message,
+            details=details,
+        )

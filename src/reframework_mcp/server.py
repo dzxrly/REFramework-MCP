@@ -7,6 +7,8 @@ from contextlib import suppress
 from typing import Any, cast
 
 from mcp.server import MCPServer
+from mcp.server.mcpserver import Context
+from pydantic import BaseModel, Field
 
 from reframework_mcp import __version__
 from reframework_mcp.errors import ErrorCode, ReframeworkMCPError, success
@@ -40,6 +42,12 @@ state. Raw addresses are diagnostic data, not stable references.
 """.strip()
 
 
+class MutationApproval(BaseModel):
+    approve: bool = Field(
+        description="Approve this exact, short-lived mutation request",
+    )
+
+
 def create_server(services: ApplicationServices) -> MCPServer:
     mcp = MCPServer(
         "REFramework-MCP",
@@ -63,6 +71,7 @@ def create_server(services: ApplicationServices) -> MCPServer:
     @mcp.tool()
     async def run_generate_sdk(
         mode: str,
+        ctx: Context,
         policy: str = "reuse_if_fresh",
         activate_snapshot: bool = True,
         index_after_export: bool = True,
@@ -76,18 +85,45 @@ def create_server(services: ApplicationServices) -> MCPServer:
             "activate_snapshot": activate_snapshot,
             "index_after_export": index_after_export,
         }
+
+        async def operation() -> dict[str, Any]:
+            effective_approval_ref = approval_ref
+            approval = services.policy.check_generate_sdk(
+                arguments,
+                effective_approval_ref,
+                services.bridge.runtime_epoch,
+            )
+            if approval:
+                effective_approval_ref = await _elicit_approval(
+                    ctx,
+                    approval,
+                    summary={
+                        **arguments,
+                        "writes_local_artifacts": True,
+                    },
+                )
+                if effective_approval_ref is None:
+                    return _approval_required(
+                        approval,
+                        {
+                            **arguments,
+                            "writes_local_artifacts": True,
+                        },
+                    )
+            return await services.run_generate_sdk(
+                mode=mode,
+                policy=policy,
+                activate_snapshot=activate_snapshot,
+                index_after_export=index_after_export,
+                approval_ref=effective_approval_ref,
+            )
+
         return cast(
             GenerateSdkResult,
             await services.with_errors(
                 "run_generate_sdk",
                 arguments,
-                lambda: services.run_generate_sdk(
-                    mode=mode,
-                    policy=policy,
-                    activate_snapshot=activate_snapshot,
-                    index_after_export=index_after_export,
-                    approval_ref=approval_ref,
-                ),
+                operation,
             ),
         )
 
@@ -474,6 +510,7 @@ def create_server(services: ApplicationServices) -> MCPServer:
         object_ref: str | None,
         member_ref: dict[str, Any],
         plan_validation_ref: str,
+        ctx: Context,
         arguments: list[Any] | None = None,
         execution_phase: str | None = None,
         expected_runtime_type: str | None = None,
@@ -499,6 +536,7 @@ def create_server(services: ApplicationServices) -> MCPServer:
                     "invoke_method",
                     payload,
                     approval_ref,
+                    ctx,
                 ),
             ),
         )
@@ -509,6 +547,7 @@ def create_server(services: ApplicationServices) -> MCPServer:
         member_ref: dict[str, Any],
         plan_validation_ref: str,
         value: Any,
+        ctx: Context,
         expected_old_value: Any = None,
         execution_phase: str | None = None,
         approval_ref: str | None = None,
@@ -528,7 +567,13 @@ def create_server(services: ApplicationServices) -> MCPServer:
             await services.with_errors(
                 "set_field",
                 payload,
-                lambda: _mutation(services, "set_field", payload, approval_ref),
+                lambda: _mutation(
+                    services,
+                    "set_field",
+                    payload,
+                    approval_ref,
+                    ctx,
+                ),
             ),
         )
 
@@ -536,6 +581,7 @@ def create_server(services: ApplicationServices) -> MCPServer:
     async def run_lua_probe(
         code: str,
         validation_ref: str,
+        ctx: Context,
         mode: str = "oneshot",
         timeout_seconds: float = 5.0,
         max_frames: int = 300,
@@ -581,7 +627,19 @@ def create_server(services: ApplicationServices) -> MCPServer:
                     services.bridge.runtime_epoch,
                 )
                 if approval:
-                    return success({"state": "approval_required", **approval})
+                    elicited_ref = await _elicit_approval(
+                        ctx,
+                        approval,
+                        summary=arguments,
+                    )
+                    if elicited_ref is None:
+                        return _approval_required(approval, arguments)
+                    services.policy.require_mutation(
+                        "run_lua_probe.windowed_hook_test",
+                        arguments,
+                        elicited_ref,
+                        services.bridge.runtime_epoch,
+                    )
             result = await services.bridge.call("run_lua_probe", payload)
             services.runtime_graph.record_probe_payload(
                 result,
@@ -599,6 +657,7 @@ def create_server(services: ApplicationServices) -> MCPServer:
     @mcp.tool()
     async def install_hook(
         member_ref: dict[str, Any],
+        ctx: Context,
         capture: list[str] | None = None,
         phase: str = "both",
         sample_rate: float = 1.0,
@@ -628,7 +687,19 @@ def create_server(services: ApplicationServices) -> MCPServer:
                     services.bridge.runtime_epoch,
                 )
                 if approval:
-                    return success({"state": "approval_required", **approval})
+                    elicited_ref = await _elicit_approval(
+                        ctx,
+                        approval,
+                        summary=payload,
+                    )
+                    if elicited_ref is None:
+                        return _approval_required(approval, payload)
+                    services.policy.require_mutation(
+                        "install_hook.transform",
+                        payload,
+                        elicited_ref,
+                        services.bridge.runtime_epoch,
+                    )
             elif not services.settings.policy.allow_observe_hooks:
                 raise ReframeworkMCPError(
                     ErrorCode.POLICY_DENIED,
@@ -755,6 +826,7 @@ def create_server(services: ApplicationServices) -> MCPServer:
                 ErrorCode.INVALID_REQUEST,
                 "No current runtime epoch is available",
             )
+        services.runtime_graph.prune_expired(runtime_epoch)
         limit = 5000
         with services.database.connect() as connection:
             nodes = connection.execute(
@@ -974,8 +1046,13 @@ async def _mutation(
     command: str,
     payload: dict[str, Any],
     approval_ref: str | None,
+    ctx: Context | None,
 ) -> dict[str, Any]:
-    services.require_live_plan_validation(str(payload["plan_validation_ref"]))
+    services.require_live_plan_validation(
+        str(payload["plan_validation_ref"]),
+        action=command,
+        payload=payload,
+    )
     approval = services.policy.require_mutation(
         command,
         payload,
@@ -983,12 +1060,18 @@ async def _mutation(
         services.bridge.runtime_epoch,
     )
     if approval:
-        return success(
-            {
-                "state": "approval_required",
-                **approval,
-                "summary": payload,
-            }
+        elicited_ref = await _elicit_approval(
+            ctx,
+            approval,
+            summary=payload,
+        )
+        if elicited_ref is None:
+            return _approval_required(approval, payload)
+        services.policy.require_mutation(
+            command,
+            payload,
+            elicited_ref,
+            services.bridge.runtime_epoch,
         )
     result = await services.bridge.call(command, payload)
     services.audit.record(
@@ -999,6 +1082,53 @@ async def _mutation(
         snapshot_id=services.metadata.active_snapshot_id(),
     )
     return success(result)
+
+
+async def _elicit_approval(
+    ctx: Context | None,
+    proposal: dict[str, Any],
+    *,
+    summary: dict[str, Any],
+) -> str | None:
+    if ctx is None:
+        return None
+    encoded_summary = json.dumps(
+        summary,
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+    if len(encoded_summary) > 1200:
+        encoded_summary = encoded_summary[:1197] + "..."
+    message = (
+        f"Approve REFramework-MCP action {proposal['action']}? "
+        f"The approval is bound to the current runtime and exact arguments, "
+        f"and expires at {proposal['expires_at']}. Request: {encoded_summary}"
+    )
+    try:
+        result = await ctx.elicit(message, MutationApproval)
+    except Exception:
+        return None
+    if result.action != "accept" or not result.data.approve:
+        raise ReframeworkMCPError(
+            ErrorCode.POLICY_DENIED,
+            f"User declined or cancelled {proposal['action']}",
+        )
+    return str(proposal["approval_ref"])
+
+
+def _approval_required(
+    proposal: dict[str, Any],
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    return success(
+        {
+            "state": "approval_required",
+            **proposal,
+            "summary": summary,
+            "elicitation_unavailable": True,
+        }
+    )
 
 
 async def _bridge_success(

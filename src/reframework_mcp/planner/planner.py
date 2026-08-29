@@ -261,11 +261,17 @@ class AccessPlanner:
             ):
                 node_kind = str(item["node_kind"])
                 evidence = item.get("evidence") or {}
-                kind = {
-                    "hook_this": RootKind.HOOK_THIS,
-                    "hook_argument": RootKind.HOOK_ARGUMENT,
-                    "hook_return": RootKind.HOOK_RETURN,
-                }.get(node_kind, RootKind.PROVIDED_OBJECT)
+                if node_kind == "singleton_instance" and evidence.get("root_kind") in {
+                    RootKind.MANAGED_SINGLETON.value,
+                    RootKind.NATIVE_SINGLETON.value,
+                }:
+                    kind = RootKind(str(evidence["root_kind"]))
+                else:
+                    kind = {
+                        "hook_this": RootKind.HOOK_THIS,
+                        "hook_argument": RootKind.HOOK_ARGUMENT,
+                        "hook_return": RootKind.HOOK_RETURN,
+                    }.get(node_kind, RootKind.PROVIDED_OBJECT)
                 if kind in {
                     RootKind.HOOK_THIS,
                     RootKind.HOOK_ARGUMENT,
@@ -276,7 +282,15 @@ class AccessPlanner:
                     RootCandidate(
                         type_name=str(item["type_name"]),
                         kind=kind,
-                        object_ref=str(item["object_ref"]),
+                        object_ref=(
+                            None
+                            if kind
+                            in {
+                                RootKind.MANAGED_SINGLETON,
+                                RootKind.NATIVE_SINGLETON,
+                            }
+                            else str(item["object_ref"])
+                        ),
                         hook_ref=(str(evidence.get("hook_ref")) if evidence.get("hook_ref") else None),
                         argument_index=(
                             int(evidence["index"])

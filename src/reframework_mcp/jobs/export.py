@@ -7,6 +7,7 @@ import json
 import secrets
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Lock
 from typing import Any, Protocol
 
 from reframework_mcp.errors import ErrorCode, ReframeworkMCPError
@@ -43,6 +44,8 @@ class ExportJobCoordinator:
         self.snapshots_dir = snapshots_dir.resolve()
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._finalizers: dict[str, asyncio.Task[None]] = {}
+        self._live_status: dict[str, dict[str, Any]] = {}
+        self._live_status_lock = Lock()
 
     def register(
         self,
@@ -67,6 +70,12 @@ class ExportJobCoordinator:
             return response
 
         created = _now()
+        response = {
+            **response,
+            "bridge_state": state,
+            "host_state": "pending" if index_after_export else "skipped",
+            "terminal": False,
+        }
         with self.database.connect() as connection:
             connection.execute(
                 """
@@ -114,7 +123,7 @@ class ExportJobCoordinator:
         with self.database.connect() as connection:
             rows = connection.execute(
                 """
-                SELECT job_ref FROM export_jobs
+                SELECT job_ref, state FROM export_jobs
                 WHERE state NOT IN ('completed', 'failed', 'cancelled', 'reused', 'host_failed')
                 ORDER BY created_at
                 """
@@ -198,6 +207,18 @@ class ExportJobCoordinator:
         try:
             dump_path, manifest_path = self._artifact_paths(status)
             manifest = self._read_manifest(manifest_path)
+            entity_counts = manifest.get("entity_counts", {}) if isinstance(manifest, dict) else {}
+            expected_entities = int(entity_counts.get("total", 0)) if isinstance(entity_counts, dict) else 0
+
+            def report_progress(type_count: int, member_count: int) -> None:
+                self._set_live_import_progress(
+                    job_ref,
+                    status,
+                    type_count=type_count,
+                    member_count=member_count,
+                    expected_entities=expected_entities,
+                )
+
             result = await asyncio.to_thread(
                 self.importer.import_file,
                 dump_path,
@@ -206,6 +227,7 @@ class ExportJobCoordinator:
                 mode=str(row["mode"]),
                 manifest=manifest,
                 activate=False,
+                progress_callback=report_progress,
             )
             snapshot_id = result.snapshot_id
             activated = False
@@ -226,12 +248,23 @@ class ExportJobCoordinator:
                 **status,
                 "state": final_state,
                 "bridge_state": bridge_state,
+                "host_state": "completed",
                 "snapshot_id": snapshot_id,
                 "reused_snapshot_id": (
                     snapshot_id if bridge_state == "reused" else status.get("reused_snapshot_id")
                 ),
                 "indexed": True,
                 "activated": activated,
+                "terminal": True,
+                "host_progress": {
+                    "phase": "metadata_index",
+                    "types_imported": result.type_count,
+                    "members_imported": result.member_count,
+                    "processed_entities": result.type_count + result.member_count,
+                    "expected_entities": expected_entities or None,
+                    "fraction": 1.0,
+                    "count_kind": "actual_committed",
+                },
             }
             error: str | None = None
         except asyncio.CancelledError:
@@ -242,7 +275,9 @@ class ExportJobCoordinator:
                 **status,
                 "state": "host_failed",
                 "bridge_state": bridge_state,
+                "host_state": "failed",
                 "host_error": error,
+                "terminal": True,
             }
 
         with self.database.connect() as connection:
@@ -264,6 +299,8 @@ class ExportJobCoordinator:
                 ),
             )
             connection.commit()
+        with self._live_status_lock:
+            self._live_status.pop(job_ref, None)
 
     async def _watch(self, job_ref: str) -> None:
         delay = 0.25
@@ -293,6 +330,13 @@ class ExportJobCoordinator:
                 ErrorCode.EXPORT_JOB_NOT_FOUND,
                 f"Export job not found: {job_ref}",
             )
+        if state not in _TERMINAL_STATES:
+            status = {
+                **status,
+                "bridge_state": state,
+                "host_state": "pending",
+                "terminal": False,
+            }
 
         snapshot_id: str | None = row["snapshot_id"]
         artifact_path: str | None = row["artifact_path"]
@@ -306,8 +350,10 @@ class ExportJobCoordinator:
                     **status,
                     "state": "indexing",
                     "bridge_state": "completed",
+                    "host_state": "indexing",
                     "indexed": False,
                     "activated": False,
+                    "terminal": False,
                 }
                 state = "indexing"
             except Exception as error:
@@ -317,8 +363,23 @@ class ExportJobCoordinator:
                     **status,
                     "state": state,
                     "bridge_state": "completed",
+                    "host_state": "failed",
                     "host_error": host_error,
+                    "terminal": True,
                 }
+        elif state in _TERMINAL_STATES:
+            if state in {"failed", "cancelled", "host_failed"}:
+                default_host_state = "not_started"
+            elif not bool(row["index_after_export"]):
+                default_host_state = "skipped"
+            else:
+                default_host_state = "completed"
+            status = {
+                **status,
+                "bridge_state": status.get("bridge_state", state),
+                "host_state": status.get("host_state", default_host_state),
+                "terminal": True,
+            }
 
         with self.database.connect() as connection:
             connection.execute(
@@ -353,6 +414,8 @@ class ExportJobCoordinator:
             **status,
             "state": state,
             "bridge_state": status.get("bridge_state", status.get("state")),
+            "host_state": state,
+            "terminal": False,
         }
         with self.database.connect() as connection:
             connection.execute(
@@ -465,8 +528,11 @@ class ExportJobCoordinator:
             return {
                 **response,
                 "reused_snapshot_id": snapshot_id,
+                "bridge_state": "reused",
+                "host_state": "completed",
                 "indexed": True,
                 "activated": activated,
+                "terminal": True,
             }
         if not index_after_export:
             if activate_snapshot:
@@ -477,8 +543,11 @@ class ExportJobCoordinator:
             return {
                 **response,
                 "reused_snapshot_id": snapshot_id or None,
+                "bridge_state": "reused",
+                "host_state": "skipped",
                 "indexed": False,
                 "activated": False,
+                "terminal": True,
             }
 
         dump_path, manifest_path = self._artifact_paths(response)
@@ -489,8 +558,10 @@ class ExportJobCoordinator:
             "job_ref": job_ref,
             "state": "indexing",
             "bridge_state": "reused",
+            "host_state": "indexing",
             "indexed": False,
             "activated": False,
+            "terminal": False,
         }
         created = _now()
         with self.database.connect() as connection:
@@ -518,9 +589,12 @@ class ExportJobCoordinator:
         self._ensure_finalizer(job_ref)
         return status
 
-    @staticmethod
-    def _row(row: Any) -> dict[str, Any]:
+    def _row(self, row: Any) -> dict[str, Any]:
         status = json.loads(row["status_json"])
+        with self._live_status_lock:
+            live = self._live_status.get(str(row["job_ref"]))
+        if live is not None:
+            status = dict(live)
         return {
             **status,
             "job_ref": row["job_ref"],
@@ -537,3 +611,36 @@ class ExportJobCoordinator:
             "updated_at": row["updated_at"],
             "error": row["error"],
         }
+
+    def _set_live_import_progress(
+        self,
+        job_ref: str,
+        status: dict[str, Any],
+        *,
+        type_count: int,
+        member_count: int,
+        expected_entities: int,
+    ) -> None:
+        processed = type_count + member_count
+        fraction = min(processed / expected_entities, 0.999) if expected_entities > 0 else None
+        value = {
+            **status,
+            "job_ref": job_ref,
+            "state": "indexing",
+            "bridge_state": status.get("bridge_state", "completed"),
+            "host_state": "indexing",
+            "indexed": False,
+            "activated": False,
+            "terminal": False,
+            "host_progress": {
+                "phase": "metadata_index",
+                "types_imported": type_count,
+                "members_imported": member_count,
+                "processed_entities": processed,
+                "expected_entities": expected_entities or None,
+                "fraction": fraction,
+                "count_kind": "actual_committed_on_success",
+            },
+        }
+        with self._live_status_lock:
+            self._live_status[job_ref] = value

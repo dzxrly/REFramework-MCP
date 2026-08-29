@@ -29,7 +29,7 @@ namespace {
 using json = nlohmann::json;
 namespace fs = std::filesystem;
 
-constexpr auto kProviderVersion = "1.0.0";
+constexpr auto kProviderVersion = "1.0.1";
 
 std::wstring widen(const std::string& value) {
     if (value.empty()) return {};
@@ -208,6 +208,45 @@ std::string stage_name(int stage) {
     return names[static_cast<std::size_t>(stage)];
 }
 
+double overall_export_progress(int stage, double stage_progress) {
+    constexpr double export_weight = 0.90;
+    constexpr double stage_count = 10.0;
+    const auto bounded_stage = std::clamp(stage, 0, 9);
+    const auto bounded_progress = std::clamp(stage_progress, 0.0, 1.0);
+    return std::min(
+        export_weight,
+        ((static_cast<double>(bounded_stage) + bounded_progress) / stage_count)
+            * export_weight);
+}
+
+std::uint64_t total_entities(const REFMCPExportTDBInfo& tdb) {
+    return static_cast<std::uint64_t>(tdb.types)
+        + static_cast<std::uint64_t>(tdb.methods)
+        + static_cast<std::uint64_t>(tdb.fields)
+        + static_cast<std::uint64_t>(tdb.properties);
+}
+
+std::uint64_t processed_entities(
+    const REFMCPExportTDBInfo& tdb,
+    int stage,
+    double stage_progress) {
+    const auto progress = std::clamp(stage_progress, 0.0, 1.0);
+    const auto portion = [progress](auto count) {
+        return static_cast<std::uint64_t>(
+            static_cast<double>(count) * progress);
+    };
+    if (stage <= 0) return 0;
+    if (stage == 1) return portion(tdb.types);
+    auto processed = static_cast<std::uint64_t>(tdb.types);
+    if (stage == 2) return processed;
+    if (stage == 3) return processed + portion(tdb.methods);
+    processed += static_cast<std::uint64_t>(tdb.methods);
+    if (stage == 4) return processed + portion(tdb.fields);
+    processed += static_cast<std::uint64_t>(tdb.fields);
+    if (stage == 5) return processed + portion(tdb.properties);
+    return total_entities(tdb);
+}
+
 class ExportService {
 public:
     ~ExportService() {
@@ -290,8 +329,13 @@ json ExportService::start(const json& request) {
     if (!snapshot_root.is_absolute()) {
         throw std::runtime_error("snapshot_root must be absolute");
     }
-    const auto current_fingerprint = fingerprint();
-    const auto game_id = safe_component(reframework_export_game_name());
+    const auto current_fingerprint = request.value(
+        "_tdb_fingerprint",
+        fingerprint());
+    const auto game_id = safe_component(request.value(
+        "_game_id",
+        std::string{reframework_export_game_name()}));
+    const auto tdb = reframework_export_tdb_info();
     const auto base = snapshot_root / game_id / current_fingerprint.substr(7, 24);
     if (policy == "reuse_if_fresh") {
         const auto reusable = find_reusable(base, current_fingerprint, mode);
@@ -315,12 +359,17 @@ json ExportService::start(const json& request) {
         {"job_ref", job_ref},
         {"state", "queued"},
         {"mode", mode},
-        {"runtime_epoch", nullptr},
+        {"runtime_epoch", request.value("_runtime_epoch", std::string{})},
+        {"reframework_version",
+            request.value("_reframework_version", std::string{"unknown"})},
         {"tdb_fingerprint", current_fingerprint},
         {"stage", "initialization"},
         {"stage_progress", 0.0},
         {"overall_progress", 0.0},
         {"processed_entities", 0},
+        {"total_entities", total_entities(tdb)},
+        {"processed_entities_kind", "estimated_from_completed_tdb_stages"},
+        {"overall_progress_kind", "weighted_monotonic"},
         {"started_at", utc_now()},
         {"last_progress_at", utc_now()},
         {"provider_version", kProviderVersion},
@@ -342,15 +391,28 @@ json ExportService::status(const json& request) {
     if (!requested.empty() && requested != m_status.value("job_ref", "")) {
         throw std::runtime_error("EXPORT_JOB_NOT_FOUND");
     }
-    auto result = m_status;
-    if (m_running) {
-        result["state"] = "exporting";
-        result["stage"] = stage_name(reframework_sdk_dump_stage());
-        result["stage_progress"] = reframework_sdk_dump_progress();
-        result["overall_progress"] = reframework_sdk_dump_progress();
-        result["last_progress_at"] = utc_now();
+    if (
+        m_running
+        && (m_status.value("state", "") == "queued"
+            || m_status.value("state", "") == "exporting")) {
+        const auto stage = reframework_sdk_dump_stage();
+        const auto stage_progress = std::clamp(
+            static_cast<double>(reframework_sdk_dump_progress()),
+            0.0,
+            1.0);
+        const auto weighted = overall_export_progress(stage, stage_progress);
+        const auto previous = m_status.value("overall_progress", 0.0);
+        const auto tdb = reframework_export_tdb_info();
+        m_status["state"] = "exporting";
+        m_status["stage"] = stage_name(stage);
+        m_status["stage_progress"] = stage_progress;
+        m_status["overall_progress"] = std::max(previous, weighted);
+        m_status["processed_entities"] =
+            processed_entities(tdb, stage, stage_progress);
+        m_status["total_entities"] = total_entities(tdb);
+        m_status["last_progress_at"] = utc_now();
     }
-    return result;
+    return m_status;
 }
 
 json ExportService::find_reusable(
@@ -368,7 +430,8 @@ json ExportService::find_reusable(
             json manifest;
             input >> manifest;
             if (manifest.value("tdb_fingerprint", "") != current_fingerprint
-                || manifest.value("mode", "") != mode) {
+                || manifest.value("mode", "") != mode
+                || manifest.value("provider_version", "") != kProviderVersion) {
                 continue;
             }
             const auto dump = directory.path() / "il2cpp_dump.json";
@@ -379,6 +442,10 @@ json ExportService::find_reusable(
                 {"mode", mode},
                 {"tdb_fingerprint", current_fingerprint},
                 {"reused_snapshot_id", manifest.value("snapshot_id", "")},
+                {"runtime_epoch", manifest.value("runtime_epoch", "")},
+                {"reframework_version",
+                    manifest.value("reframework_version", "unknown")},
+                {"entity_counts", manifest.value("entity_counts", json::object())},
                 {"artifacts", {
                     {"il2cpp_dump", narrow(dump)},
                     {"manifest", narrow(manifest_path)},
@@ -472,6 +539,16 @@ void ExportService::run(json request, std::string job_ref) {
             {"game_id", request.at("_game_id")},
             {"tdb_version", tdb.version},
             {"tdb_fingerprint", request.at("_fingerprint")},
+            {"runtime_epoch", request.value("_runtime_epoch", std::string{})},
+            {"reframework_version",
+                request.value("_reframework_version", std::string{"unknown"})},
+            {"entity_counts", {
+                {"types", tdb.types},
+                {"methods", tdb.methods},
+                {"fields", tdb.fields},
+                {"properties", tdb.properties},
+                {"total", total_entities(tdb)},
+            }},
             {"provider", "reframework_export_service"},
             {"provider_version", kProviderVersion},
             {"mode", mode},
@@ -506,6 +583,8 @@ void ExportService::run(json request, std::string job_ref) {
             {"stage", "completed"},
             {"stage_progress", 1.0},
             {"overall_progress", 1.0},
+            {"processed_entities", total_entities(tdb)},
+            {"total_entities", total_entities(tdb)},
             {"snapshot_id", snapshot_id},
             {"artifact_sha256", artifact_sha256},
             {"completed_at", utc_now()},

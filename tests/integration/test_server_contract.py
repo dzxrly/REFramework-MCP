@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -62,6 +63,27 @@ def test_server_registers_frozen_v1_tool_set(tmp_path: Path) -> None:
 
     assert set(server._tool_manager._tools) == EXPECTED_TOOLS
     assert set(server._resource_manager._templates) == EXPECTED_RESOURCES
+
+
+def test_mutation_tools_hide_context_and_accept_approval_required_output(
+    tmp_path: Path,
+) -> None:
+    services = ApplicationServices(
+        Settings(data_dir=tmp_path, database_path=tmp_path / "metadata.db"),
+        BridgeClient(InMemoryTransport(lambda _request: {})),
+    )
+    tools = create_server(services)._tool_manager._tools
+
+    for name in (
+        "run_generate_sdk",
+        "invoke_method",
+        "set_field",
+        "run_lua_probe",
+        "install_hook",
+    ):
+        tool = tools[name]
+        assert "ctx" not in tool.parameters.get("properties", {})
+        assert "ApprovalRequiredData" in json.dumps(tool.output_schema)
 
 
 @pytest.mark.asyncio

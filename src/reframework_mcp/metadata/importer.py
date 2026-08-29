@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -105,6 +105,7 @@ class Il2CppDumpImporter:
         mode: str = "json_only",
         manifest: Mapping[str, Any] | None = None,
         activate: bool = True,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> ImportResult:
         resolved = path.resolve()
         digest = _sha256_file(resolved)
@@ -125,6 +126,11 @@ class Il2CppDumpImporter:
                     "SELECT type_count, member_count FROM snapshots WHERE snapshot_id = ?",
                     (snapshot_id,),
                 ).fetchone()
+                if progress_callback is not None:
+                    progress_callback(
+                        int(counts["type_count"]),
+                        int(counts["member_count"]),
+                    )
                 return ImportResult(
                     snapshot_id=snapshot_id,
                     artifact_sha256=digest,
@@ -180,6 +186,8 @@ class Il2CppDumpImporter:
                         )
                         type_count += 1
                         member_count += added
+                        if progress_callback is not None and type_count % 100 == 0:
+                            progress_callback(type_count, member_count)
 
                 for section, status in coverage.items():
                     connection.execute(
@@ -200,6 +208,8 @@ class Il2CppDumpImporter:
                 if activate:
                     self._activate(connection, snapshot_id)
                 connection.commit()
+                if progress_callback is not None:
+                    progress_callback(type_count, member_count)
             except Exception as error:
                 connection.rollback()
                 with self.database.connect() as failure_connection:

@@ -378,6 +378,7 @@ nlohmann::json HookManager::argument_value(
     return {
         {"object_ref", m_objects.put_managed(object, type, std::chrono::seconds{30})},
         {"type", name},
+        {"lease_seconds", 30},
     };
 }
 
