@@ -34,6 +34,40 @@ def _pwsh() -> str:
     return executable
 
 
+def _workflow_pwsh_scripts(workflow: str) -> list[str]:
+    lines = workflow.splitlines()
+    scripts: list[str] = []
+    for shell_index, shell_line in enumerate(lines):
+        if shell_line.strip() != "shell: pwsh":
+            continue
+
+        property_indent = len(shell_line) - len(shell_line.lstrip())
+        run_index: int | None = None
+        for candidate_index in range(shell_index + 1, len(lines)):
+            candidate = lines[candidate_index]
+            if not candidate.strip():
+                continue
+            candidate_indent = len(candidate) - len(candidate.lstrip())
+            if candidate_indent < property_indent:
+                break
+            if candidate_indent == property_indent and candidate.strip() == "run: |":
+                run_index = candidate_index
+                break
+
+        assert run_index is not None, f"pwsh step at line {shell_index + 1} has no run block"
+        body: list[str] = []
+        for source_line in lines[run_index + 1 :]:
+            if not source_line.strip():
+                body.append("")
+                continue
+            source_indent = len(source_line) - len(source_line.lstrip())
+            if source_indent <= property_indent:
+                break
+            body.append(source_line[property_indent + 2 :])
+        scripts.append("\n".join(body))
+    return scripts
+
+
 def _run_resolver(
     temporary: Path,
     release_tags: list[str],
@@ -270,6 +304,32 @@ def test_workflow_separates_compatibility_from_python_packaging() -> None:
     assert "package_ref_nightly_release.ps1" in workflow
     assert "--notes-file" not in workflow
     assert '"--notes="' in workflow
+
+
+def test_workflow_inline_pwsh_scripts_parse() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    scripts = _workflow_pwsh_scripts(workflow)
+    parser = (
+        "$source = [Console]::In.ReadToEnd(); "
+        "$tokens = $null; $errors = $null; "
+        "[System.Management.Automation.Language.Parser]::ParseInput("
+        "$source, [ref]$tokens, [ref]$errors) | Out-Null; "
+        "if ($errors.Count -gt 0) { "
+        "$errors | ForEach-Object { [Console]::Error.WriteLine($_.Message) }; exit 1 }"
+    )
+
+    assert len(scripts) == 6
+    for index, script in enumerate(scripts, start=1):
+        result = subprocess.run(
+            [_pwsh(), "-NoProfile", "-NonInteractive", "-Command", parser],
+            cwd=ROOT,
+            input=script,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 0, f"inline pwsh block {index}: {result.stderr}"
 
 
 def test_project_version_has_one_literal_source() -> None:

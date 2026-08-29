@@ -55,14 +55,15 @@ jobs:
 
           $target = Get-Content -LiteralPath ".tmp\release-target.json" -Raw |
             ConvertFrom-Json
-          @"
-          ## REF Nightly target
-
-          - Target: $($target.nightly_tag)
-          - Source: $($target.source_commit)
-          - Release: $($target.release_tag)
-          - Decision: $($target.decision)
-          "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          $summary = @(
+            "## REF Nightly target"
+            ""
+            "- Target: $($target.nightly_tag)"
+            "- Source: $($target.source_commit)"
+            "- Release: $($target.release_tag)"
+            "- Decision: $($target.decision)"
+          )
+          $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
       - name: Upload ReleaseTarget
         if: ${{ steps.target.outputs.should_build == 'true' }}
@@ -113,15 +114,16 @@ jobs:
           $reportPath = ".tmp\nightly-diagnostics\compatibility-report.json"
           if (Test-Path -LiteralPath $reportPath) {
             $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
-            @"
-            ## REF Nightly compatibility
-
-            - Status: $($report.status)
-            - Stage: $($report.failure_stage)
-            - Target: $($report.official_nightly_tag)
-            - Source: $($report.source_commit)
-            - Adapter: $($report.adapter_mode)
-            "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            $summary = @(
+              "## REF Nightly compatibility"
+              ""
+              "- Status: $($report.status)"
+              "- Stage: $($report.failure_stage)"
+              "- Target: $($report.official_nightly_tag)"
+              "- Source: $($report.source_commit)"
+              "- Adapter: $($report.adapter_mode)"
+            )
+            $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
           }
 
       - name: Upload compatible runtime
@@ -190,14 +192,15 @@ jobs:
           $reportPath = ".tmp\nightly-package-diagnostics\package-report.json"
           if (Test-Path -LiteralPath $reportPath) {
             $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
-            @"
-            ## Release package
-
-            - Status: $($report.status)
-            - Stage: $($report.failure_stage)
-            - Release: $($report.release_tag)
-            - Archive: $($report.archive_name)
-            "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            $summary = @(
+              "## Release package"
+              ""
+              "- Status: $($report.status)"
+              "- Stage: $($report.failure_stage)"
+              "- Release: $($report.release_tag)"
+              "- Archive: $($report.archive_name)"
+            )
+            $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
           }
 
       - name: Upload package diagnostics
