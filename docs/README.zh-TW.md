@@ -24,8 +24,7 @@ Ctrl+C 即可停止。封裝版不需要另外安裝 Python，也沒有 GUI 或�
 
 ## 連接 MCP 用戶端
 
-支援 Streamable HTTP 的用戶端可直接連線至
-http://127.0.0.1:9966/mcp。
+支援 Streamable HTTP 的用戶端可直接連線至 http://127.0.0.1:9966/mcp
 
 如果用戶端透過 stdio 啟動伺服器，請讓它指向同一個 EXE：
 
@@ -113,12 +112,6 @@ cmake --install out\build --config Release --prefix "<遊戲目錄>"
 .\.venv\Scripts\python.exe -m mypy src
 .\.venv\Scripts\python.exe -m build
 ~~~
-
-## 發布
-
-儲存庫只保留一個 GitHub Actions 工作流程。它每天兩次檢查官方 REF Nightly，
-也可手動執行。發現新 Nightly 後，會完成測試、建置、封裝並建立 GitHub
-Release；手動執行還可以指定 Nightly tag 或強制再次發布。
 
 ## 授權條款
 

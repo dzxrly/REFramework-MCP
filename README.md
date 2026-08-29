@@ -119,13 +119,6 @@ Run the project checks with:
 .\.venv\Scripts\python.exe -m build
 ~~~
 
-## Releases
-
-The single GitHub Actions workflow checks the official REF Nightly twice a day
-and can also be run manually. A new Nightly runs the full test, build, package,
-and GitHub Release job. Manual runs can choose a Nightly tag or force another
-release.
-
 ## License
 
 MIT. REFramework is a separate project with its own license.

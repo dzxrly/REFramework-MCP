@@ -24,8 +24,7 @@ Ctrl+C 即可停止。打包版不需要另装 Python，也没有 GUI 或必填�
 
 ## 连接 MCP 客户端
 
-支持 Streamable HTTP 的客户端可直接连接
-http://127.0.0.1:9966/mcp。
+支持 Streamable HTTP 的客户端可直接连接 http://127.0.0.1:9966/mcp 。
 
 如果客户端通过 stdio 启动服务器，让它指向同一个 EXE：
 
