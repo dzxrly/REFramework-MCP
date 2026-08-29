@@ -24,8 +24,8 @@ concurrency:
 
 jobs:
   release:
-    name: Check, build, and release REF Nightly
-    runs-on: windows-2025
+    name: Check, build, and release
+    runs-on: windows-2022
     timeout-minutes: 180
 
     steps:
