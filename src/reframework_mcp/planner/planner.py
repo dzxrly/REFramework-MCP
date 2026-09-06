@@ -873,7 +873,7 @@ class AccessPlanner:
         with self.database.connect() as connection:
             row = connection.execute(
                 """
-                SELECT flags, raw_json FROM types
+                SELECT flags, raw_json, parent_name FROM types
                 WHERE snapshot_id=? AND full_name=?
                 """,
                 (snapshot_id, type_name),
@@ -881,15 +881,19 @@ class AccessPlanner:
         if row is None:
             return False
         raw = json.loads(row["raw_json"])
-        return bool(raw.get("is_enum")) or "enum" in str(row["flags"] or "").casefold()
+        return (
+            row["parent_name"] == "System.Enum"
+            or bool(raw.get("is_enum"))
+            or "enum" in str(row["flags"] or "").casefold()
+        )
 
     @staticmethod
     def _container_operation(type_name: str) -> AccessOperation | None:
         if type_name.startswith(("System.Array<", "System.Array[")) or type_name.endswith("[]"):
             return AccessOperation.CONSTRUCT_ARRAY
-        if "List<" in type_name:
+        if "List<" in type_name or "List`1<" in type_name:
             return AccessOperation.CONSTRUCT_LIST
-        if "Dictionary<" in type_name:
+        if "Dictionary<" in type_name or "Dictionary`2<" in type_name:
             return AccessOperation.CONSTRUCT_DICTIONARY
         return None
 

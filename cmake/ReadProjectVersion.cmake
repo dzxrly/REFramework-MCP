@@ -19,6 +19,14 @@ endfunction()
 
 function(refmcp_configure_version_header version generated_include_dir)
     set(REFMCP_VERSION "${version}")
+    set(plan_helpers "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../reframework/probe_service/plan_helpers.lua")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${plan_helpers}")
+    file(READ "${plan_helpers}" REFMCP_PLAN_HELPERS)
+    file(MAKE_DIRECTORY "${generated_include_dir}/reframework_mcp")
+    configure_file(
+        "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../reframework/probe_service/PlanHelpers.hpp.in"
+        "${generated_include_dir}/reframework_mcp/plan_helpers.hpp" @ONLY
+    )
     file(MAKE_DIRECTORY "${generated_include_dir}/reframework_mcp")
     configure_file(
         "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/version.hpp.in"

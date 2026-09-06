@@ -34,6 +34,7 @@ endif()
 
 add_library(reframework_mcp SHARED
     src/bridge.cpp
+    src/access_plan_executor.cpp
     src/export_adapter.cpp
     src/hook_manager.cpp
     src/named_pipe_server.cpp

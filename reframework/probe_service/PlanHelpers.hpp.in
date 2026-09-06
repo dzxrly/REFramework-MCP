@@ -1,0 +1,2 @@
+#pragma once
+inline constexpr auto kPlanHelpers = R"refmcp(@REFMCP_PLAN_HELPERS@)refmcp";

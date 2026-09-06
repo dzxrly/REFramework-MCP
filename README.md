@@ -71,9 +71,23 @@ object references expire when the game session changes.
 - Metadata and objects: runtime_status, run_generate_sdk, search_types,
   describe_type, search_members, find_type_dependencies, list_singletons,
   inspect_object
-- Call chains: search_usage_examples, find_access_paths, validate_access_plan
+- Call chains: search_usage_examples, find_access_paths, bind_access_plan,
+  validate_access_plan
 - Lua and runtime actions: draft_lua_probe, validate_lua_probe, run_lua_probe,
   invoke_method, set_field, install_hook, remove_hook
+
+## Bound inputs and collections
+
+Use bind_access_plan to fill constant or ObjectRef inputs, then validate the
+returned plan_ref. Live guards check types, numeric ranges, and compatible casts.
+Intermediate calls require an exact getter_allowlist; target calls remain dry runs.
+
+inspect_object pages arrays, Lists, and Dictionaries with collection_offset and
+collection_limit. iterate and filter preserve page cursors, and generated Lua
+processes every selected element. Use the matching 1.1.0 game runtime.
+
+See [AccessPlan contracts and examples](docs/access-plans.md) for limits and
+unsupported operations.
 
 ## Offline indexing
 

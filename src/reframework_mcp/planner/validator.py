@@ -10,6 +10,8 @@ from typing import Any, Protocol
 from reframework_mcp.errors import ErrorCode, ReframeworkMCPError
 from reframework_mcp.metadata import MetadataRepository
 from reframework_mcp.models import AccessPlan, PlanValidation, ValidationStep
+from reframework_mcp.planner.binding import validated_bindings
+from reframework_mcp.planner.contracts import LIVE_OPERATIONS, node_error
 from reframework_mcp.storage import Database
 
 
@@ -37,6 +39,7 @@ class AccessPlanValidator:
         *,
         live: bool = True,
         allow_getters: bool = False,
+        getter_allowlist: list[str] | None = None,
     ) -> PlanValidation:
         self._ensure_plan(plan)
         symbolic_steps = self._symbolic(plan)
@@ -53,15 +56,54 @@ class AccessPlanValidator:
             return validation
 
         if live and self.bridge.connected:
+            unsupported = [node for node in plan.nodes if node.operation not in LIVE_OPERATIONS]
+            if unsupported:
+                validation = self._make_validation(
+                    plan,
+                    [
+                        ValidationStep(
+                            node_id=unsupported[0].node_id,
+                            status="invalid",
+                            error_code=ErrorCode.CAPABILITY_UNAVAILABLE.value,
+                            message="Operation has no side-effect-free live validator",
+                        )
+                    ],
+                    status="failed",
+                    symbolic_valid=True,
+                    live_valid=False,
+                )
+                self._save(validation)
+                return validation
             response = await self.bridge.call(
                 "validate_access_plan",
                 {
                     "plan": plan.model_dump(mode="json"),
                     "allow_getters": allow_getters,
+                    "getter_allowlist": getter_allowlist or [],
                 },
             )
             live_steps = [ValidationStep.model_validate(step) for step in response.get("steps", [])]
             status = str(response.get("status", "failed"))
+            if status == "valid" and (
+                [step.node_id for step in live_steps] != [node.node_id for node in plan.nodes]
+                or any(step.status != "valid" for step in live_steps)
+            ):
+                status = "failed"
+                live_steps.append(
+                    ValidationStep(
+                        node_id=next(
+                            (
+                                node.node_id
+                                for node in plan.nodes
+                                if node.node_id not in {step.node_id for step in live_steps}
+                            ),
+                            plan.targets[0] if plan.targets else plan.nodes[-1].node_id,
+                        ),
+                        status="invalid",
+                        error_code=ErrorCode.VALIDATION_FAILED.value,
+                        message="Bridge returned incomplete or inconsistent validation steps",
+                    )
+                )
             validation = self._make_validation(
                 plan,
                 live_steps or symbolic_steps,
@@ -111,6 +153,17 @@ class AccessPlanValidator:
             )
         steps: list[ValidationStep] = []
         for node in plan.nodes:
+            problem = node_error(node)
+            if problem:
+                steps.append(
+                    ValidationStep(
+                        node_id=node.node_id,
+                        status="invalid",
+                        error_code=ErrorCode.PLAN_INVALID.value,
+                        message=problem,
+                    )
+                )
+                continue
             if node.member is not None:
                 if node.member.snapshot_id != plan.snapshot_id:
                     steps.append(
@@ -133,7 +186,11 @@ class AccessPlanValidator:
                     )
                     continue
                 member = self.metadata.member_by_pk(node.member.member_id, plan.snapshot_id)
-                if member is None:
+                if (
+                    member is None
+                    or member["canonical_signature"] != node.member.canonical_signature
+                    or str(member["kind"]) != node.member.kind.value
+                ):
                     steps.append(
                         ValidationStep(
                             node_id=node.node_id,
@@ -180,6 +237,9 @@ class AccessPlanValidator:
         failed = next((step.node_id for step in steps if step.status != "valid"), None)
         return PlanValidation(
             plan_ref=plan.plan_ref,
+            mutation_bindings=[binding.model_dump(mode="json") for binding in validated_bindings(plan, steps)]
+            if live_valid
+            else [],
             validation_ref=f"validated_plan:{runtime_epoch or 'offline'}:{digest}",
             status=status,
             symbolic_valid=symbolic_valid,

@@ -23,6 +23,7 @@ EXPECTED_TOOLS = {
     "search_usage_examples",
     "find_access_paths",
     "validate_access_plan",
+    "bind_access_plan",
     "draft_lua_probe",
     "validate_lua_probe",
     "invoke_method",

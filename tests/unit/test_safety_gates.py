@@ -11,7 +11,8 @@ import pytest
 from reframework_mcp.bridge import BridgeClient, InMemoryTransport
 from reframework_mcp.config import PolicySettings, Settings
 from reframework_mcp.errors import ErrorCode, ReframeworkMCPError
-from reframework_mcp.models import AccessPlan
+from reframework_mcp.models import AccessPlan, ValidationStep
+from reframework_mcp.planner.binding import validated_bindings
 from reframework_mcp.policy import ApprovalManager, PolicyEngine
 from reframework_mcp.server import _elicit_approval
 from reframework_mcp.services import ApplicationServices
@@ -216,7 +217,18 @@ def _insert_bound_validation(
                 validation_ref,
                 plan.plan_ref,
                 "runtime:test",
-                json.dumps({"live_valid": True, "steps": steps}),
+                json.dumps(
+                    {
+                        "live_valid": True,
+                        "steps": steps,
+                        "mutation_bindings": [
+                            binding.model_dump(mode="json")
+                            for binding in validated_bindings(
+                                plan, [ValidationStep.model_validate(step) for step in steps]
+                            )
+                        ],
+                    }
+                ),
                 created_at.isoformat(),
                 (created_at + timedelta(minutes=1)).isoformat(),
             ),

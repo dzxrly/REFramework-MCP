@@ -10,6 +10,31 @@ from reframework_mcp.metadata import Il2CppDumpImporter, MetadataRepository
 from reframework_mcp.storage import Database
 
 
+def test_running_export_without_index_keeps_host_skipped(tmp_path):
+    class RunningBridge:
+        connected = True
+
+        async def call(self, command, payload):
+            return {"job_ref": payload["job_ref"], "state": "exporting", "stage": "methods"}
+
+    database = Database(tmp_path / "metadata.db")
+    database.initialize()
+    coordinator = ExportJobCoordinator(
+        database, Il2CppDumpImporter(database), RunningBridge(), tmp_path / "snapshots"
+    )
+    coordinator.register(
+        {"job_ref": "export:no-index", "state": "queued"},
+        mode="json_only",
+        policy="reuse_if_fresh",
+        activate_snapshot=False,
+        index_after_export=False,
+    )
+    result = asyncio.run(coordinator.refresh("export:no-index"))
+    assert result["state"] == "exporting"
+    assert result["host_state"] == "skipped"
+    assert result["terminal"] is False
+
+
 class CompletedExportBridge:
     connected = True
 

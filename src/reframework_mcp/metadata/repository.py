@@ -114,6 +114,18 @@ class MetadataRepository:
             "next_offset": bounded_offset + bounded_limit if has_more else None,
         }
 
+    def enum_underlying_type(self, full_name: str, snapshot_id: str) -> str | None:
+        """Use the enum storage field, including dumps that omit enum flags."""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                """SELECT m.value_type FROM types t JOIN members m
+                   ON m.snapshot_id=t.snapshot_id AND m.declaring_type=t.full_name
+                   WHERE t.snapshot_id=? AND t.full_name=? AND t.parent_name='System.Enum'
+                     AND m.kind='tdb_field' AND m.name='value__' LIMIT 1""",
+                (snapshot_id, full_name),
+            ).fetchone()
+        return str(row["value_type"]) if row and row["value_type"] else None
+
     def describe_type(
         self,
         full_name: str,

@@ -151,3 +151,4 @@ class PlanValidation(BaseModel):
     steps: list[ValidationStep] = Field(default_factory=list)
     failed_node: str | None = None
     alternatives: list[dict[str, Any]] = Field(default_factory=list)
+    mutation_bindings: list[dict[str, Any]] = Field(default_factory=list)

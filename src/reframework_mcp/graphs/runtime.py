@@ -697,29 +697,17 @@ class RuntimeGraphStore:
         now = _now()
         epoch_clause = "runtime_epoch = ?" if runtime_epoch else "1 = 1"
         params: tuple[Any, ...] = (runtime_epoch, now) if runtime_epoch else (now,)
-        expired_rows = connection.execute(
-            f"""
-            SELECT node_ref FROM runtime_nodes
-            WHERE {epoch_clause} AND expires_at IS NOT NULL AND expires_at <= ?
-            """,
-            params,
-        ).fetchall()
-        expired = [str(row["node_ref"]) for row in expired_rows]
-        if not expired:
-            return 0
-        placeholders = ",".join("?" for _ in expired)
+        expired_query = f"SELECT node_ref FROM runtime_nodes WHERE {epoch_clause} AND expires_at IS NOT NULL AND expires_at <= ?"
         connection.execute(
-            f"""
-            DELETE FROM runtime_edges
-            WHERE source_ref IN ({placeholders}) OR target_ref IN ({placeholders})
-            """,
-            (*expired, *expired),
+            f"DELETE FROM runtime_edges WHERE source_ref IN ({expired_query}) OR target_ref IN ({expired_query})",
+            (*params, *params),
         )
-        connection.execute(
-            f"DELETE FROM runtime_nodes WHERE node_ref IN ({placeholders})",
-            expired,
+        return int(
+            connection.execute(
+                f"DELETE FROM runtime_nodes WHERE node_ref IN ({expired_query})",
+                params,
+            ).rowcount
         )
-        return len(expired)
 
     @staticmethod
     def _insert_edge(

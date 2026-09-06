@@ -3,18 +3,30 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any
 
 from reframework_mcp import __version__
+from reframework_mcp.errors import ErrorCode, ReframeworkMCPError
 from reframework_mcp.metadata import MetadataRepository
 from reframework_mcp.models import AccessOperation, AccessPlan, RootKind
+from reframework_mcp.planner.contracts import node_error
 
 _METHOD_SIGNATURE = re.compile(r"^[^:]+::(.+?)\s*->\s*.+$")
 
 
 def _lua_string(value: str) -> str:
-    return json.dumps(value, ensure_ascii=False)
+    escapes = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t"}
+    encoded = "".join(
+        escapes[character]
+        if character in escapes
+        else f"\\{ord(character):03d}"
+        if ord(character) < 32 or ord(character) == 127
+        else character
+        for character in value
+    )
+    return '"' + encoded + '"'
 
 
 def _method_selector(canonical: str) -> str:
@@ -56,13 +68,38 @@ class LuaDraftService:
             "",
         ]
         assumptions = list(plan.assumptions)
+        sequences: set[str] = set()
         variables: dict[str, str] = {}
-        for node in plan.nodes:
-            variable = f"n_{node.node_id}"
+        for index, node in enumerate(plan.nodes):
+            safe_id = node.node_id.replace("-", "_")
+            variable = f"n_{index}_{safe_id}"
             variables[node.node_id] = variable
             input_variable = variables[node.inputs[0]] if node.inputs else None
-            generated = self._node_lines(node, variable, input_variable, variables)
-            lines.extend(generated)
+            problem = node_error(node)
+            if problem:
+                raise ReframeworkMCPError(ErrorCode.PLAN_INVALID, problem, details={"node_id": node.node_id})
+            is_mapped = bool(
+                node.inputs
+                and node.inputs[0] in sequences
+                and node.operation
+                not in {
+                    AccessOperation.ITERATE,
+                    AccessOperation.INDEX,
+                    AccessOperation.FILTER,
+                    AccessOperation.EMIT,
+                }
+            )
+            generated = self._node_lines(
+                node, variable, "item_value" if is_mapped else input_variable, variables
+            )
+            if is_mapped:
+                lines.append(f"local {variable} = probe.map_sequence({input_variable}, function(item_value)")
+                lines.extend("    " + line for line in generated)
+                lines.extend([f"    return {variable}", "end)"])
+            else:
+                lines.extend(generated)
+            if is_mapped or node.operation in {AccessOperation.ITERATE, AccessOperation.FILTER}:
+                sequences.add(node.node_id)
             if not node.nullable and node.operation is not AccessOperation.BIND_CONSTANT:
                 lines.append(f"{variable} = require_value({variable}, {_lua_string(node.node_id)})")
             if node.side_effect == "unknown":
@@ -71,7 +108,7 @@ class LuaDraftService:
 
         if emit_targets:
             for target in plan.targets:
-                lines.append(f"probe.emit({_lua_string(target)}, {variables[target]})")
+                lines.append(f"probe.emit({_lua_string(target)}, probe.export_value({variables[target]}))")
         lines.append("return true")
         code = "\n".join(lines).rstrip() + "\n"
         unresolved = [
@@ -127,7 +164,12 @@ class LuaDraftService:
         if op is AccessOperation.RESOLVE_TYPE:
             return [f"local {variable} = sdk.find_type_definition({_lua_string(node.output_type or '')})"]
         if op is AccessOperation.BIND_CONSTANT:
-            return [f"local {variable} = {self._literal(node.value)}"]
+            literal = self._literal(node.value)
+            if node.output_type:
+                return [
+                    f"local {variable} = probe.assert_type({literal}, {_lua_string(node.output_type)}, {self._literal(node.nullable)})"
+                ]
+            return [f"local {variable} = {literal}"]
         if op is AccessOperation.READ_FIELD:
             field_name = _member_name(node.member.canonical_signature)
             return [
@@ -169,11 +211,27 @@ class LuaDraftService:
                 f"{_lua_string(node.node_id + '_method')})(nil{suffix})",
             ]
         if op is AccessOperation.CAST:
-            return [f"local {variable} = {input_variable}"]
-        if op in {AccessOperation.INDEX, AccessOperation.ITERATE}:
-            index = int(node.options.get("index", 0))
             return [
-                f"local {variable} = require_value({input_variable}, {_lua_string(node.inputs[0])})[{index}]"
+                f"local {variable} = probe.assert_type({input_variable}, {_lua_string(node.output_type or node.options.get('expected_type', ''))})"
+            ]
+        if op is AccessOperation.INDEX:
+            return [
+                f"local {variable} = probe.index_collection({input_variable}, {int(node.options['index'])})"
+            ]
+        if op is AccessOperation.ITERATE:
+            return [
+                f"local {variable} = probe.iterate({input_variable}, {node.options.get('offset', 0)}, {node.options.get('limit', 100)})"
+            ]
+        if op is AccessOperation.FILTER:
+            return [
+                f"local {variable} = probe.filter_sequence({input_variable}, "
+                f"{self._literal(node.options.get('field'))}, {_lua_string(node.options.get('operator', 'eq'))}, "
+                f"{self._literal(node.options['value'])}, {node.options.get('offset', 0)}, {node.options.get('limit', 100)})"
+            ]
+        if op is AccessOperation.ASSERT_RANGE:
+            return [
+                f"local {variable} = probe.assert_range({input_variable}, "
+                f"{self._literal(node.options.get('min'))}, {self._literal(node.options.get('max'))})"
             ]
         if op is AccessOperation.CONSTRUCT_LIST:
             type_name = node.output_type or node.options.get("type_name", "")
@@ -198,7 +256,7 @@ class LuaDraftService:
         if op is AccessOperation.EMIT:
             name = str(node.options.get("name", node.node_id))
             return [
-                f"probe.emit({_lua_string(name)}, {input_variable})",
+                f"probe.emit({_lua_string(name)}, probe.export_value({input_variable}))",
                 f"local {variable} = {input_variable}",
             ]
         return [
@@ -220,7 +278,15 @@ class LuaDraftService:
             return "true"
         if value is False:
             return "false"
-        if isinstance(value, (int, float)):
+        if isinstance(value, int):
+            if not -(2**63) <= value < 2**63:
+                raise ReframeworkMCPError(
+                    ErrorCode.CAPABILITY_UNAVAILABLE, "Lua integer literals require signed 64-bit values"
+                )
+            return "math.mininteger" if value == -(2**63) else repr(value)
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                raise ReframeworkMCPError(ErrorCode.PLAN_INVALID, "Lua numeric literals must be finite")
             return repr(value)
         if isinstance(value, str):
             return _lua_string(value)

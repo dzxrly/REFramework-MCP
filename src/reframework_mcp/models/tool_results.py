@@ -135,6 +135,14 @@ class AccessPathsData(TypedDict):
     plans: list[dict[str, Any]]
 
 
+class PlanBindingData(TypedDict):
+    source_plan_ref: str
+    plan_ref: str
+    plan: dict[str, Any]
+    unresolved_nodes: list[dict[str, Any]]
+    operation_support: dict[str, dict[str, bool]]
+
+
 class PlanValidationData(TypedDict):
     plan_ref: str
     validation_ref: str
@@ -147,6 +155,7 @@ class PlanValidationData(TypedDict):
     steps: list[dict[str, Any]]
     failed_node: str | None
     alternatives: list[dict[str, Any]]
+    mutation_bindings: NotRequired[list[dict[str, Any]]]
 
 
 class LuaDraftData(TypedDict):
@@ -238,6 +247,7 @@ ObjectInspectionResult = ToolSuccess[ObjectInspectionData] | ToolFailure
 UsageExamplesResult = ToolSuccess[UsageExamplesData] | ToolFailure
 AccessPathsResult = ToolSuccess[AccessPathsData] | ToolFailure
 PlanValidationResult = ToolSuccess[PlanValidationData] | ToolFailure
+PlanBindingResult = ToolSuccess[PlanBindingData] | ToolFailure
 LuaDraftResult = ToolSuccess[LuaDraftData] | ToolFailure
 LuaValidationResult = ToolSuccess[LuaValidationData] | ToolFailure
 InvokeMethodResult = ToolSuccess[InvokeMethodData | ApprovalRequiredData] | ToolFailure

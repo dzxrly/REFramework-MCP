@@ -14,7 +14,8 @@ enum REFMCPProbeCapabilityV1 {
     REFMCP_PROBE_ONESHOT = 1u << 1,
     REFMCP_PROBE_WINDOWED = 1u << 2,
     REFMCP_PROBE_INSTRUCTION_LIMIT = 1u << 3,
-    REFMCP_PROBE_EMIT = 1u << 4
+    REFMCP_PROBE_EMIT = 1u << 4,
+    REFMCP_PROBE_COLLECTION_READ = 1u << 5
 };
 
 typedef int32_t (*REFMCPProbeInvokeV1)(
@@ -32,6 +33,9 @@ typedef void (*REFMCPProbeSetObjectResolverV1)(
     void* context,
     REFMCPProbeObjectResolverV1 resolver);
 
+typedef const char* (*REFMCPProbeObjectRegistrarV1)(void* context, void* object);
+typedef void (*REFMCPProbeSetObjectRegistrarV1)(REFMCPProbeObjectRegistrarV1 registrar);
+
 typedef struct REFMCPProbeServiceV1 {
     uint32_t abi_version;
     uint32_t struct_size;
@@ -40,6 +44,7 @@ typedef struct REFMCPProbeServiceV1 {
     REFMCPProbeInvokeV1 invoke;
     REFMCPProbeTickV1 tick;
     REFMCPProbeSetObjectResolverV1 set_object_resolver;
+    REFMCPProbeSetObjectRegistrarV1 set_object_registrar;
 } REFMCPProbeServiceV1;
 
 typedef const REFMCPProbeServiceV1* (*REFMCPGetProbeServiceV1)(void);

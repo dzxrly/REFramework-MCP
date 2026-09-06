@@ -1,6 +1,7 @@
 #include "probe_adapter.hpp"
 
 #include <stdexcept>
+#include <cstddef>
 #include <vector>
 
 namespace reframework_mcp {
@@ -27,7 +28,7 @@ ProbeAdapter::ProbeAdapter(HMODULE reframework_module) {
         return;
     }
     if (
-        m_service->struct_size < sizeof(REFMCPProbeServiceV1)
+        m_service->struct_size < offsetof(REFMCPProbeServiceV1, set_object_registrar)
         || m_service->invoke == nullptr
         || m_service->tick == nullptr
         || m_service->set_object_resolver == nullptr
@@ -43,6 +44,7 @@ ProbeAdapter::~ProbeAdapter() {
             invoke("shutdown_probe_service", nlohmann::json::object());
         } catch (...) {
         }
+        if (collection_available()) m_service->set_object_registrar(nullptr);
         m_service->set_object_resolver(nullptr, nullptr);
     }
 }
@@ -72,6 +74,7 @@ nlohmann::json ProbeAdapter::capability_status() const {
             (m_service->capabilities & REFMCP_PROBE_INSTRUCTION_LIMIT) != 0},
         {"emit", (m_service->capabilities & REFMCP_PROBE_EMIT) != 0},
         {"object_ref_injection", true},
+        {"collection_read", collection_available()},
     };
 }
 
@@ -82,7 +85,8 @@ nlohmann::json ProbeAdapter::invoke(
         throw std::runtime_error(m_error);
     }
     const auto request = payload.dump();
-    std::vector<char> response(64u * 1024u);
+    // Allocate before invoking: a size retry would execute a probe twice.
+    std::vector<char> response(16u * 1024u * 1024u);
     uint32_t length{};
     auto result = m_service->invoke(
         command.c_str(),
@@ -135,6 +139,35 @@ void ProbeAdapter::bind_object_registry(
     m_hooks = &hooks;
     if (available()) {
         m_service->set_object_resolver(this, &ProbeAdapter::resolve_object);
+        if (collection_available()) m_service->set_object_registrar(&ProbeAdapter::register_object);
+    }
+}
+
+bool ProbeAdapter::collection_available() const noexcept {
+    return available() && m_service->struct_size >= sizeof(REFMCPProbeServiceV1)
+        && (m_service->capabilities & REFMCP_PROBE_COLLECTION_READ) != 0
+        && m_service->set_object_registrar != nullptr;
+}
+
+nlohmann::json ProbeAdapter::read_collection(
+    const std::string& object_ref, std::size_t offset, std::size_t limit) const {
+    if (!collection_available()) {
+        return {{"supported", false}, {"items", nlohmann::json::array()},
+            {"reason", "Update the paired REFramework runtime to enable collection reads"}};
+    }
+    return invoke("read_collection", {{"object_ref", object_ref}, {"offset", offset}, {"limit", limit}});
+}
+
+const char* ProbeAdapter::register_object(void* context, void* pointer) noexcept {
+    try {
+        auto* adapter = static_cast<ProbeAdapter*>(context);
+        auto* object = static_cast<reframework::API::ManagedObject*>(pointer);
+        if (!adapter || !adapter->m_objects || !object || !object->is_managed_object()) return nullptr;
+        thread_local std::string reference;
+        reference = adapter->m_objects->put_managed(object, object->get_type_definition());
+        return reference.c_str();
+    } catch (...) {
+        return nullptr;
     }
 }
 

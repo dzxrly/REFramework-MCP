@@ -334,7 +334,7 @@ class ExportJobCoordinator:
             status = {
                 **status,
                 "bridge_state": state,
-                "host_state": "pending",
+                "host_state": "pending" if bool(row["index_after_export"]) else "skipped",
                 "terminal": False,
             }
 

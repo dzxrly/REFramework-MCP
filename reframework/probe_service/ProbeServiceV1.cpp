@@ -2,6 +2,7 @@
 #include "ProbeServiceHooks.hpp"
 
 #include <reframework_mcp/version.hpp>
+#include <reframework_mcp/plan_helpers.hpp>
 
 #include <Windows.h>
 #include <bcrypt.h>
@@ -63,6 +64,7 @@ std::unordered_map<lua_State*, std::weak_ptr<ProbeRun>> g_by_state;
 std::deque<std::string> g_order;
 void* g_resolver_context{};
 REFMCPProbeObjectResolverV1 g_object_resolver{};
+REFMCPProbeObjectRegistrarV1 g_object_registrar{};
 
 std::string utc_timestamp() {
     const auto now = std::chrono::system_clock::now();
@@ -102,7 +104,7 @@ std::shared_ptr<ProbeRun> run_for_state(lua_State* lua) {
     return found == g_by_state.end() ? nullptr : found->second.lock();
 }
 
-json lua_value(lua_State* lua, int index, int depth = 0) {
+json lua_value(lua_State* lua, int index, int depth = 0, std::size_t max_entries = 1000) {
     if (depth > 4) {
         return {{"kind", "truncated"}, {"reason", "max_depth"}};
     }
@@ -123,12 +125,12 @@ json lua_value(lua_State* lua, int index, int depth = 0) {
         return std::string{value != nullptr ? value : "", length};
     }
     case LUA_TTABLE: {
-        const auto array_size = std::min<std::size_t>(lua_rawlen(lua, absolute), 100);
+        const auto array_size = std::min<std::size_t>(lua_rawlen(lua, absolute), max_entries);
         if (array_size > 0) {
             json result = json::array();
             for (std::size_t position = 1; position <= array_size; ++position) {
                 lua_rawgeti(lua, absolute, static_cast<lua_Integer>(position));
-                result.push_back(lua_value(lua, -1, depth + 1));
+                result.push_back(lua_value(lua, -1, depth + 1, max_entries));
                 lua_pop(lua, 1);
             }
             return result;
@@ -136,7 +138,7 @@ json lua_value(lua_State* lua, int index, int depth = 0) {
         json result = json::object();
         std::size_t count{};
         lua_pushnil(lua);
-        while (count < 100 && lua_next(lua, absolute) != 0) {
+        while (count < max_entries && lua_next(lua, absolute) != 0) {
             std::string key;
             if (lua_type(lua, -2) == LUA_TSTRING) {
                 key = lua_tostring(lua, -2);
@@ -145,12 +147,17 @@ json lua_value(lua_State* lua, int index, int depth = 0) {
             } else {
                 key = "key_" + std::to_string(count);
             }
-            result[key] = lua_value(lua, -1, depth + 1);
+            result[key] = lua_value(lua, -1, depth + 1, max_entries);
             lua_pop(lua, 1);
             ++count;
         }
         if (lua_gettop(lua) >= absolute + 1) {
             lua_pop(lua, 1);
+        }
+        if (result.contains("adapter") && result.contains("logical_count") && result.contains("items")) {
+            if (result["items"].is_object() && result["items"].empty()) result["items"] = json::array();
+            if (!result.contains("next_offset")) result["next_offset"] = nullptr;
+            for (auto& item : result["items"]) if (item.is_object() && !item.contains("value")) item["value"] = nullptr;
         }
         return result;
     }
@@ -240,6 +247,15 @@ int probe_resolve_pointer(lua_State* lua) {
     return 1;
 }
 
+int probe_store_object(lua_State* lua) {
+    const auto pointer = lua_touserdata(lua, 1);
+    const auto* reference = g_object_registrar != nullptr
+        ? g_object_registrar(g_resolver_context, pointer) : nullptr;
+    if (reference == nullptr) return luaL_error(lua, "Cannot retain collection object");
+    lua_pushstring(lua, reference);
+    return 1;
+}
+
 void install_probe_api(const std::shared_ptr<ProbeRun>& run) {
     auto* lua = run->lua;
     for (const auto* name : {
@@ -261,6 +277,8 @@ void install_probe_api(const std::shared_ptr<ProbeRun>& run) {
     lua_setfield(lua, -2, "emit");
     lua_pushcfunction(lua, probe_resolve_pointer);
     lua_setfield(lua, -2, "_resolve_pointer");
+    lua_pushcfunction(lua, probe_store_object);
+    lua_setfield(lua, -2, "_store_object");
     lua_setglobal(lua, "probe");
 
     constexpr auto bootstrap = R"lua(
@@ -309,6 +327,10 @@ void install_probe_api(const std::shared_ptr<ProbeRun>& run) {
         throw std::runtime_error(
             message != nullptr ? message : "Unable to initialize probe API");
     }
+    if (luaL_dostring(lua, kPlanHelpers) != LUA_OK) {
+        const auto* message = lua_tostring(lua, -1);
+        throw std::runtime_error(message != nullptr ? message : "Unable to initialize plan helpers");
+    }
     lua_sethook(lua, instruction_hook, LUA_MASKCOUNT, kInstructionHookStep);
 }
 
@@ -345,7 +367,7 @@ std::shared_ptr<ProbeRun> create_run(const json& request) {
     {
         std::scoped_lock lock{g_mutex};
         g_runs.emplace(run->probe_ref, run);
-        g_by_state.emplace(run->lua, run);
+        g_by_state.insert_or_assign(run->lua, run);
         g_order.push_back(run->probe_ref);
     }
     try {
@@ -377,6 +399,36 @@ json status_json(const std::shared_ptr<ProbeRun>& run) {
         {"events", run->events},
         {"event_resource", "reframework://probes/" + run->probe_ref + "/events"},
     };
+}
+
+json read_collection(const json& request) {
+    auto run = create_run({{"mode", "oneshot"}, {"max_events", 1}, {"max_instructions", 1'000'000}});
+    try {
+        const auto reference = request.at("object_ref").get<std::string>();
+        lua_pushlstring(run->lua, reference.data(), reference.size());
+        lua_setglobal(run->lua, "_collection_ref");
+        lua_pushinteger(run->lua, request.value("offset", 0));
+        lua_setglobal(run->lua, "_collection_offset");
+        lua_pushinteger(run->lua, request.value("limit", 100));
+        lua_setglobal(run->lua, "_collection_limit");
+        constexpr auto code = "return probe.export_value(probe.collection_page("
+            "probe.resolve_object(_collection_ref), _collection_offset, _collection_limit))";
+        if (luaL_dostring(run->lua, code) != LUA_OK) {
+            const auto* message = lua_tostring(run->lua, -1);
+            throw std::runtime_error(message != nullptr ? message : "Collection read failed");
+        }
+        auto page = lua_value(run->lua, -1, 0, 1000);
+        if (!page.contains("next_offset")) page["next_offset"] = nullptr;
+        if (page["items"].is_object() && page["items"].empty()) page["items"] = json::array();
+        for (auto& item : page["items"]) if (!item.contains("value")) item["value"] = nullptr;
+        run->state = "completed";
+        request_destroy(run);
+        return page;
+    } catch (...) {
+        run->state = "failed";
+        request_destroy(run);
+        throw;
+    }
 }
 
 json compile_probe(const json& request) {
@@ -493,7 +545,8 @@ void service_tick() {
             if (run->destruction_requested && run->cleanup_ticks > 0) {
                 --run->cleanup_ticks;
                 if (run->cleanup_ticks == 0 && run->lua != nullptr) {
-                    g_by_state.erase(run->lua);
+                    const auto owner = g_by_state.find(run->lua);
+                    if (owner != g_by_state.end() && owner->second.lock() == run) g_by_state.erase(owner);
                     run->lua = nullptr;
                 }
             }
@@ -547,7 +600,13 @@ void set_object_resolver(
     g_object_resolver = resolver;
 }
 
+void set_object_registrar(REFMCPProbeObjectRegistrarV1 registrar) {
+    std::scoped_lock lock{g_mutex};
+    g_object_registrar = registrar;
+}
+
 json dispatch(const std::string& command, const json& request) {
+    if (command == "read_collection") return read_collection(request);
     if (command == "compile_lua_probe") return compile_probe(request);
     if (command == "run_lua_probe") return run_probe(request);
     if (command == "get_probe_status") return status_json(require_run(request));
@@ -622,11 +681,13 @@ const REFMCPProbeServiceV1 kService{
         | REFMCP_PROBE_ONESHOT
         | REFMCP_PROBE_WINDOWED
         | REFMCP_PROBE_INSTRUCTION_LIMIT
-        | REFMCP_PROBE_EMIT,
+        | REFMCP_PROBE_EMIT
+        | REFMCP_PROBE_COLLECTION_READ,
     kProviderVersion,
     invoke_service,
     service_tick,
     set_object_resolver,
+    set_object_registrar,
 };
 
 } // namespace

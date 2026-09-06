@@ -22,6 +22,7 @@ from reframework_mcp.models.tool_results import (
     LuaDraftResult,
     LuaValidationResult,
     ObjectInspectionResult,
+    PlanBindingResult,
     PlanValidationResult,
     ProbeRunResult,
     RuntimeStatusResult,
@@ -32,6 +33,8 @@ from reframework_mcp.models.tool_results import (
     TypeDependenciesResult,
     UsageExamplesResult,
 )
+from reframework_mcp.planner.binding import bind_plan
+from reframework_mcp.planner.contracts import node_error, operation_support
 from reframework_mcp.services import ApplicationServices
 
 SERVER_INSTRUCTIONS = """
@@ -408,11 +411,42 @@ def create_server(services: ApplicationServices) -> MCPServer:
         )
 
     @mcp.tool()
+    async def bind_access_plan(
+        bindings: dict[str, Any],
+        plan_ref: str | None = None,
+        plan: dict[str, Any] | None = None,
+    ) -> PlanBindingResult:
+        """Bind typed constants or ObjectRefs by node ID; return a new plan and remaining inputs."""
+        arguments = {"bindings": bindings, "plan_ref": plan_ref, "plan": plan}
+
+        def operation() -> dict[str, Any]:
+            source = services.load_plan(plan_ref, plan)
+            bound = bind_plan(source, bindings, services.metadata)
+            services.planner.save_plan(bound)
+            unresolved = [
+                {"node_id": node.node_id, "output_type": node.output_type, "reason": error}
+                for node in bound.nodes
+                if (error := node_error(node))
+            ]
+            return success(
+                {
+                    "source_plan_ref": source.plan_ref,
+                    "plan_ref": bound.plan_ref,
+                    "plan": bound.model_dump(mode="json"),
+                    "unresolved_nodes": unresolved,
+                    "operation_support": operation_support(),
+                }
+            )
+
+        return cast(PlanBindingResult, await services.with_errors("bind_access_plan", arguments, operation))
+
+    @mcp.tool()
     async def validate_access_plan(
         plan_ref: str | None = None,
         plan: dict[str, Any] | None = None,
         live: bool = True,
         allow_getters: bool = False,
+        getter_allowlist: list[str] | None = None,
     ) -> PlanValidationResult:
         """Validate an AccessPlan symbolically and, when connected, node by node in game."""
 
@@ -421,6 +455,7 @@ def create_server(services: ApplicationServices) -> MCPServer:
             "plan": plan,
             "live": live,
             "allow_getters": allow_getters,
+            "getter_allowlist": getter_allowlist or [],
         }
 
         async def operation() -> dict[str, Any]:
@@ -429,6 +464,7 @@ def create_server(services: ApplicationServices) -> MCPServer:
                 selected,
                 live=live,
                 allow_getters=allow_getters,
+                getter_allowlist=getter_allowlist,
             )
             return success(result.model_dump(mode="json"))
 

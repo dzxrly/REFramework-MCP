@@ -1,6 +1,7 @@
 #pragma once
 
 #include "export_adapter.hpp"
+#include "command_error.hpp"
 #include "hook_manager.hpp"
 #include "named_pipe_server.hpp"
 #include "object_registry.hpp"
@@ -41,7 +42,8 @@ private:
         std::atomic<bool> cancelled{false};
     };
 
-    class CommandError;
+    using CommandError = BridgeError;
+    friend class AccessPlanExecutor;
 
     nlohmann::json dispatch(const std::string& command, const nlohmann::json& payload);
     nlohmann::json dispatch_game_thread(
@@ -65,6 +67,7 @@ private:
         bool allow_getters,
         const nlohmann::json& getter_allowlist);
     nlohmann::json inspect_collection(
+        const std::string& object_ref,
         const ObjectEntry& entry,
         std::size_t collection_offset,
         std::size_t collection_limit);
@@ -93,7 +96,8 @@ private:
         const nlohmann::json& value);
     std::vector<void*> encode_arguments(
         reframework::API::Method* method,
-        const nlohmann::json& arguments);
+        const nlohmann::json& arguments,
+        bool materialize_strings = true);
     nlohmann::json invoke(
         reframework::API::Method* method,
         reframework::API::ManagedObject* object,

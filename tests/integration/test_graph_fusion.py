@@ -177,6 +177,29 @@ def test_usage_indexer_persists_explicit_graph_edges(
     assert "CODE_HOOKS_MEMBER" in kinds
 
 
+def test_expiry_cleanup_is_not_limited_by_number_of_sql_parameters(tmp_path):
+    import sqlite3
+
+    database = Database(tmp_path / "expiry-limit.db")
+    database.initialize()
+    graph = RuntimeGraphStore(database)
+    graph.record_singletons(
+        {
+            "runtime_epoch": "runtime:test",
+            "items": [
+                {"kind": "managed_singleton", "type_name": "app.Test", "object_ref": f"obj:expired-{index}"}
+                for index in range(40)
+            ],
+        }
+    )
+    with database.connect() as connection:
+        connection.execute("UPDATE runtime_nodes SET expires_at='2000-01-01' WHERE node_ref LIKE 'obj:%'")
+        connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 32)
+        assert graph._prune_expired(connection, "runtime:test") == 40
+        assert connection.execute("SELECT COUNT(*) FROM runtime_edges").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM runtime_nodes").fetchone()[0] == 1
+
+
 def test_expired_object_refs_are_pruned_from_runtime_graph(
     tmp_path: Path,
 ) -> None:

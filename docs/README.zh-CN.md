@@ -66,9 +66,22 @@ invoke_method、set_field 和修改行为的 Hook 需要审批。游戏会话变
 - 元数据与对象：runtime_status、run_generate_sdk、search_types、
   describe_type、search_members、find_type_dependencies、list_singletons、
   inspect_object
-- 调用链：search_usage_examples、find_access_paths、validate_access_plan
+- 调用链：search_usage_examples、find_access_paths、bind_access_plan、
+  validate_access_plan
 - Lua 与运行时操作：draft_lua_probe、validate_lua_probe、run_lua_probe、
   invoke_method、set_field、install_hook、remove_hook
+
+## 参数绑定与集合读取
+
+使用 bind_access_plan 按节点 ID 填入常量或 ObjectRef，再验证返回的新 plan_ref。
+实时验证会检查类型、数值范围和转换兼容性。中间调用需要精确的 getter_allowlist，
+目标方法只验证参数和接收者，不执行。
+
+inspect_object 可通过 collection_offset 和 collection_limit 分页读取数组、List
+和 Dictionary。iterate、filter 保留续页游标，生成的 Lua 会处理每个选中元素。
+这些功能需要配套的 1.1.0 游戏运行时。
+
+具体参数、边界与示例见 [AccessPlan 工具契约](access-plans.md)。
 
 ## 离线索引
 

@@ -22,10 +22,13 @@ public:
     [[nodiscard]] nlohmann::json capability_status() const;
     nlohmann::json invoke(const std::string& command, const nlohmann::json& payload) const;
     void tick() const noexcept;
+    [[nodiscard]] bool collection_available() const noexcept;
+    nlohmann::json read_collection(const std::string& object_ref, std::size_t offset, std::size_t limit) const;
     void bind_object_registry(ObjectRegistry& objects, HookManager& hooks);
 
 private:
     static void* resolve_object(void* context, const char* opaque_reference) noexcept;
+    static const char* register_object(void* context, void* object) noexcept;
 
     const REFMCPProbeServiceV1* m_service{};
     ObjectRegistry* m_objects{};
